@@ -1,0 +1,47 @@
+services:
+  trash-docker:
+    # Use a prebuilt image
+    image: locomanipulation_teleop_image
+    container_name: locomanipulation_teleop_container
+    network_mode: "host"        # equivalent to --network=host (Linux only)
+    ipc: host                   # larger shared memory segment visibility
+    shm_size: "2gb"             # helpful for CV/ML workloads
+    privileged: true
+
+
+    # GPU access (Compose supports `gpus: all`)
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
+      - ROS_DOMAIN_ID=45
+
+      # X11 GUI forwarding (Linux Xorg)
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - WAYLAND_DISPLAY=$WAYLAND_DISPLAY
+
+      # ROS 2 defaults (change if you prefer CycloneDDS)
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+
+    volumes:
+      # X11 socket
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Mount your workspace from host -> container
+      - ../../..:/home
+
+
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # or a number, e.g., 1
+              capabilities: [gpu] # gpu, utility, video, compute, graphics
+
+    working_dir: /home
+    stdin_open: true            # -i
+    tty: true                   # -t
+    command: ["/bin/bash"]      # drop into a shell

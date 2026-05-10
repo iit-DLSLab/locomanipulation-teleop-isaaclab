@@ -1,0 +1,37 @@
+name: locomanipulation_teleop_ros2_env
+channels:
+- conda-forge
+- nvidia
+- robostack-staging
+dependencies:
+- pip
+- python
+- numpy
+- scipy
+- cuda-nvcc 
+- ros-humble-desktop
+- ros-humble-rmw-cyclonedds-cpp
+- ros-humble-rosidl-generator-dds-idl
+- ros-humble-plotjuggler-ros
+- ros-humble-librealsense2
+- ros-humble-realsense2-camera-msgs
+- ros-humble-realsense2-camera
+- compilers 
+- cmake 
+- pkg-config 
+- make 
+- ninja 
+- colcon-common-extensions 
+- catkin_tools 
+- rosdep
+- tqdm
+- gymnasium
+- onnxruntime
+- wandb
+- pip:
+  - readchar
+  - onnxruntime
+  - torch
+  - mujoco
+  - loop_rate_limiters
+  - mink
