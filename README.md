@@ -11,7 +11,7 @@ An IsaacLab extension by DLS for performing teleoperation with Unitree Go2 + Agi
 
 ## Cite this work
 
-If you find the work useful, please consider citing:
+This work takes a lot of code and ideas developed in our repo [trash-collection-isaaclab](https://github.com/iit-DLSLab/trash-collection-isaaclab). If you find the work useful, please consider citing:
 
 #### [BinWalker: Development and Field Evaluation of a Quadruped Manipulator Platform for Sustainable Litter Collection](https://arxiv.org/pdf/2603.10529)
 
