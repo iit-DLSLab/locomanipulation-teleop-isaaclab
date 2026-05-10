@@ -65,21 +65,26 @@ class IKMink:
         ]
 
         # Enable collision avoidance between the following geoms.
-        # left hand - table, right hand - table
-        # left hand - left thigh, right hand - right thigh
-        """self.collision_pairs = [
-            (["link02_geom2"], ["base"]),
+        self.collision_pairs = [
+            (["base_collision1", "base_collision2", "base_collision3"],
+            ["link2_collision1", "link2_collision2",
+            "link3_collision1", "link3_collision2",
+            "link4_collision",
+            "link5_collision",
+            "link6_collision",
+            "link7_collision",
+            "link8_collision"])
         ]
         self.collision_avoidance_limit = mink.CollisionAvoidanceLimit(
             model=self.model,
             geom_pairs=self.collision_pairs,  # type: ignore
-            minimum_distance_from_collisions=0.005,
+            minimum_distance_from_collisions=0.02,
             collision_detection_distance=0.15,
-        )"""
+        )
 
         self.limits = [
             mink.ConfigurationLimit(self.model),
-            #self.collision_avoidance_limit,
+            self.collision_avoidance_limit,
         ]
 
         # IK settings.
