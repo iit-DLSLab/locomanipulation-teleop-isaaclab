@@ -277,6 +277,7 @@
                                     <geom size="0.017 0.045 0.0125" pos="-0.0760961 -0.03 0.032" quat="0.819648 0 -0.572867 0" type="box" class="collision"/>
                                     
                                     <!--geom size="0.01 0.03  0.002" pos="0.0 -0.003 0.11" quat="0.707105 0.707108 0 0" type="box" class="collision"/-->
+                                    <site name="attachment_site" size="0.01" pos="0 0 0.1" rgba="1 0 0 1" group="1"/>
 
                                     <body name="link7" pos="0 0 0.13503" quat="0.707105 0.707108 0 0">
                                         <inertial pos="0.000277817 -0.0467674 -0.0092103" quat="0.553273 0.439968 -0.46134 0.536174" mass="0.0264822" diaginertia="1.45133e-05 1.0004e-05 5.87021e-06"/>

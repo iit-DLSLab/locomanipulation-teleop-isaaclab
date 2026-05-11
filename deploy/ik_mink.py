@@ -47,7 +47,7 @@ class IKMink:
             frame_name="attachment_site",
             frame_type="site",
             position_cost=1.0,
-            orientation_cost=0.1,
+            orientation_cost=0.,
             lm_damping=1.0,
         )
 

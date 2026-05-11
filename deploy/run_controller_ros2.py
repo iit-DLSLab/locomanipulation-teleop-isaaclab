@@ -90,20 +90,23 @@ class TrashControlNode(Node):
         self.gripper_joint_velocity = 0
         self.legs_joints_position = np.zeros(12)  # 12 leg joints
         self.legs_joints_velocity = np.zeros(12)  # 12 leg joints 
-        self.desired_joint_pos_arm = self.mjData.qpos[19:25] 
+        self.desired_joint_pos_arm = np.zeros(6)
         self.desired_joint_pos_gripper = 0
         self.desired_joint_pos_leg = self.mjData.qpos[7:19]
-        self.desired_pose_command_overwrite = np.zeros(2)
-        self.Kp_legs = 0
-        self.Kd_legs = 0
-        self.Kp_arm = 0
-        self.Kd_arm = 0
-        self.Kp_gripper = 0
-        self.Kd_gripper = 0
+        self.desired_pose_command = np.zeros(2)
+        self.Kp_legs = config.Kp_stand_up_and_down
+        self.Kd_legs = config.Kp_stand_up_and_down
+        self.Kp_arm = config.Kp_arm
+        self.Kd_arm = config.Kd_arm
+        self.Kp_gripper = config.Kp_gripper
+        self.Kd_gripper = config.Kd_gripper
 
         # --------------------------------------------------------------
         self.ref_base_lin_vel_H = np.array([0.0, 0.0, 0.0])  # Desired base linear velocity in the horizontal plane (x, y, z)
         self.ref_base_ang_yaw_dot = 0.0  # Desired base angular velocity around the vertical axis
+        self.ref_ee_lin_vel = np.array([0.0, 0.0, 0.0])
+        self.ref_ee_angular_vel = np.array([1.0, 0.0, 0.0, 0.0])
+        self.ref_ee_lin_pos = np.array([0.0, 0.0, 0.0])
 
         # Interactive Command Line
         from console import Console
@@ -151,13 +154,6 @@ class TrashControlNode(Node):
         self.linear_velocity = np.zeros(3)
         self.angular_velocity = np.zeros(3)
 
-        self.R_OpO = np.zeros((3, 3), dtype=float)
-
-        self.r_optical_to_camera_frame = np.array([
-                                                [0.0, 0.0,  1.0],
-                                                [-1.0, 0.0, 0.0],
-                                                [0.0, -1.0, 0.0]
-                                            ])
         self.old_buttons = np.zeros(11)
 
     
@@ -166,10 +162,18 @@ class TrashControlNode(Node):
         Callback function to handle joystick input. Joystick used is a 
         8Bitdo Ultimate 2C Wireless Controller.
         """
-        filter_joystick = 0.7
-        self.ref_base_lin_vel_H[0] = self.ref_base_lin_vel_H[0]*filter_joystick + (msg.axes[1]/3.5)*(1-filter_joystick)  # Forward/Backward
-        self.ref_base_lin_vel_H[1] = self.ref_base_lin_vel_H[1]*filter_joystick + (msg.axes[0]/3.5)*(1-filter_joystick)  # Left/Right
-        self.ref_base_ang_yaw_dot = self.ref_base_ang_yaw_dot*filter_joystick + (msg.axes[3]/2.)*(1-filter_joystick)  # Yaw
+        if(self.console.isArmJoystickActivated):
+            filter_joystick = 0.7
+            self.ref_ee_lin_vel[0] = self.ref_ee_lin_vel[0]*filter_joystick + (msg.axes[4]/20)*(1-filter_joystick)  # Forward/Backward
+            self.ref_ee_lin_vel[1] = self.ref_ee_lin_vel[1]*filter_joystick + (msg.axes[0]/20)*(1-filter_joystick)  # Left/Right
+            self.ref_ee_lin_vel[2] = self.ref_ee_lin_vel[2]*filter_joystick + (msg.axes[1]/20)*(1-filter_joystick)  # Up/Down
+
+            self.ref_ee_lin_pos = self.ref_ee_lin_pos + self.ref_ee_lin_vel * 0.05
+        else:
+            filter_joystick = 0.7
+            self.ref_base_lin_vel_H[0] = self.ref_base_lin_vel_H[0]*filter_joystick + (msg.axes[1]/3.5)*(1-filter_joystick)  # Forward/Backward
+            self.ref_base_lin_vel_H[1] = self.ref_base_lin_vel_H[1]*filter_joystick + (msg.axes[0]/3.5)*(1-filter_joystick)  # Left/Right
+            self.ref_base_ang_yaw_dot = self.ref_base_ang_yaw_dot*filter_joystick + (msg.axes[3]/2.)*(1-filter_joystick)  # Yaw
 
         self.last_joy_time = time.time()
 
@@ -185,7 +189,6 @@ class TrashControlNode(Node):
         elif self.old_buttons[7] == 0 and msg.buttons[7] == 1:
             print("Locomotion activation")
             self.console.isRLActivated = not self.console.isRLActivated
-            self.old_buttons *= 0
             self.old_buttons[7] = 1
         elif(msg.axes[7] == 1.0):
             print("goUp")
@@ -193,6 +196,17 @@ class TrashControlNode(Node):
         elif(msg.axes[7] == -1.0):
             print("goDown")
             self.console.goDown()
+
+        elif(self.old_buttons[6] == 0 and msg.buttons[6] == 1):
+            print("activateArm")
+            self.console.isArmActivated = not self.console.isArmActivated
+            self.old_buttons[6] = 1
+
+        elif(self.old_buttons[0] == 0 and msg.buttons[0] == 1):
+            print("Arm only Joystick")
+            self.console.isArmJoystickActivated = not self.console.isArmJoystickActivated
+            self.old_buttons[0] = 1
+
 
 
 
@@ -274,12 +288,15 @@ class TrashControlNode(Node):
 
 
         # IK controller --------------------------------------------------------------
-        """reference_base_pose, \
-            reference_joints_position, \
-            ik_succeded = self.ik_mink_solver.compute(target_pos, target_quat, initial_joints_position, 
-                                                    initial_base_pose, optimize_height=True, optimize_pitch=True)
-        self.desired_joint_pos_arm = self.state_machine.desired_position
-        self.desired_joint_vel_arm = self.state_machine.desired_velocity"""
+        ee_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+        if(self.console.isArmActivated):
+            self.desired_pose_command, \
+                self.desired_joint_pos_arm, \
+                ik_succeded = self.ik_mink_solver.compute(self.ref_ee_lin_pos, ee_quat, self.arm_joints_position, 
+                                                        self.desired_pose_command, optimize_height=True, optimize_pitch=True)
+        else:
+            self.desired_joint_pos_arm = joints_pos_arm 
 
         # RL controller --------------------------------------------------------------
         if self.console.isRLActivated:            
@@ -295,7 +312,7 @@ class TrashControlNode(Node):
                         joints_pos_arm=joints_pos_arm,
                         ref_base_lin_vel=ref_base_lin_vel, 
                         ref_base_ang_vel=ref_base_ang_vel,
-                        ref_pose_command=self.desired_pose_command_overwrite,
+                        ref_pose_command=self.desired_pose_command,
                         heightmap_data=self.heightmap.data if self.locomotion_policy.use_vision else None)
 
             self.Kp_legs = self.locomotion_policy.Kp_walking
@@ -333,10 +350,10 @@ class TrashControlNode(Node):
         arm_trajectory_generator_msg = ArmTrajectoryGenerator()
         arm_trajectory_generator_msg.timestamp = float(self.get_clock().now().nanoseconds)
         arm_trajectory_generator_msg.desired_arm_joints_position = self.desired_joint_pos_arm.tolist()
-        arm_trajectory_generator_msg.desired_arm_joints_velocity = self.desired_joint_vel_arm.tolist()
+        arm_trajectory_generator_msg.desired_arm_joints_velocity = (self.desired_joint_pos_arm*0.0).tolist()
         arm_trajectory_generator_msg.arm_kp = (np.ones(6)*self.Kp_arm).tolist()
         arm_trajectory_generator_msg.arm_kd = (np.ones(6)*self.Kd_arm).tolist()
-        arm_trajectory_generator_msg.desired_arm_gripper_position = float(self.desired_gripper_position)
+        arm_trajectory_generator_msg.desired_arm_gripper_position = float(self.desired_joint_pos_gripper)
         self.publisher_arm_trajectory_generator.publish(arm_trajectory_generator_msg)
 
 

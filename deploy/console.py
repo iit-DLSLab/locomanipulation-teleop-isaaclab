@@ -13,10 +13,12 @@ class Console():
 
         self.isDown = True
         self.isRLActivated = False
+        self.isArmActivated = False
+        self.isArmJoystickActivated = False
 
         # Autocomplete setup
         self.commands = [
-            "help", "ictp", "goUp", "goDown", "activate", "ictp", "setKp", "setKd",
+            "help", "ictp", "goUp", "goDown", "activateRL", "activateArm",  "ictp", "setKp", "setKd",
             "setBasePose"
         ]
         readline.set_completer(self.complete)
@@ -107,9 +109,12 @@ class Console():
                     self.goDown()
 
                     
-                elif(input_string == "activate"):
+                elif(input_string == "activateRL"):
                     self.isRLActivated = not self.isRLActivated
 
+                elif(input_string == "activateArm"):
+                    self.isArmActivated = not self.isArmActivated
+                    self.controller_node.desired_joint_pos_arm = np.zeros(6)
 
                 elif(input_string == "help"):
                     self.print_all_commands()
@@ -296,20 +301,5 @@ class Console():
         print("setKp: Set the Kp values for the legs")
         print("setKd: Set the Kd values for the legs")
         print("setBasePose: Set desired base pitch and height")
-        print("armHome: Move arm to home position")
-        print("armRest: Move arm to rest position")
-        print("armDance: Move the arm to random ee position")
-        print("armPreReachObject: Move arm to pre-reach object position")
-        print("armReachObjectRL: Move arm to reach object position using RL")
-        print("armReachObjectIK: Move arm to reach object position using IK")
-        print("armReachBasket: Move arm to reach basket position")
-        print("armOpenBasket: Open the basket")
-        print("armCloseGripper: Close the gripper")
-        print("armOpenGripper: Open the gripper")
-        print("showDetectionVisualizer: Toggle detection visualizer\n")
+        print("armHome: Move arm to home positionr\n")
         print("\nAvailable joystick commands:")
-        print("joy A: Go Rest")
-        print("joy B: Reach Basket")
-        print("joy X: Collect Object")
-        print("joy Y: Empty the Basket\n")
-

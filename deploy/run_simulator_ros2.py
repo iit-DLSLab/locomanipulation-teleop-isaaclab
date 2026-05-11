@@ -51,8 +51,7 @@ class MujocoSimulationNode(Node):
         self.publisher_arm_blind_state = self.create_publisher(ArmState,"/arm_state", 1)
         self.subscriber_trajectory_generator_arm = self.create_subscription(ArmTrajectoryGenerator,"/arm_trajectory_generator", self.get_arm_trajectory_generator_callback, 1)
         self.subscriber_trajectory_generator_legs = self.create_subscription(TrajectoryGenerator,"/trajectory_generator", self.get_legs_trajectory_generator_callback, 1)
-        self.publisher_detections = self.create_publisher(PoseArray,"/detections3d/grasp_poses", QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        
+
         self.timer = self.create_timer(self.simulation_dt, self.compute_simulator_step_callback)
 
         # Desired PD
@@ -139,48 +138,6 @@ class MujocoSimulationNode(Node):
         arm_blind_state_msg.joints_position = self.mjData.qpos[19:25].tolist()
         arm_blind_state_msg.joints_velocity = self.mjData.qvel[18:24].tolist()
         self.publisher_arm_blind_state.publish(arm_blind_state_msg)
-
-
-        # Publish the position of the bottle ----------------------------------------------------------
-        detections_msg = PoseArray()
-        detections_msg.header.stamp = self.get_clock().now().to_msg()
-
-        # --- World-frame positions ---
-        p_WO = self.mjData.xpos[self.mjModel.body('waterbottle').id].copy()
-        R_WO = self.mjData.site_xmat[self.mjModel.site('waterbottle_site').id].copy().reshape(3, 3)
-        q_wo = np.zeros(4)
-        mujoco.mju_mat2Quat(q_wo, R_WO.reshape(9,))
-
-        cam_id  = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_CAMERA, "robotcam")
-        p_WC = self.mjData.cam_xpos[cam_id].copy()     # camera origin in world
-        R_WC = self.mjData.cam_xmat[cam_id].copy().reshape(3, 3)
-
-        # --- Transform world → camera ---
-        p_CO = R_WC.T @ (p_WO - p_WC)
-        R_CO = R_WC.T @ R_WO
-
-        r_optical_to_camera_frame = np.array([
-                                                [0.0, 0.0,  1.0],
-                                                [-1.0, 0.0, 0.0],
-                                                [0.0, -1.0, 0.0]
-                                            ])
-
-        #in run controller I am moving from optical to camera frame, so I need to do the opposite here
-        p_CO = r_optical_to_camera_frame.T @ p_CO
-        R_CO = r_optical_to_camera_frame.T @ R_CO
-        q_co = np.zeros(4)
-        mujoco.mju_mat2Quat(q_co, R_CO.reshape(9,))
-
-        detection_pose = Pose()
-        detection_pose.position.x = p_CO[0]
-        detection_pose.position.y = p_CO[1]
-        detection_pose.position.z = p_CO[2]
-        detection_pose.orientation.w = q_co[0]
-        detection_pose.orientation.x = q_co[1]
-        detection_pose.orientation.y = q_co[2]
-        detection_pose.orientation.z = q_co[3]
-        detections_msg.poses.append(detection_pose)
-        self.publisher_detections.publish(detections_msg)
 
 
         # Render only at a certain frequency -----------------------------------------------------------------
