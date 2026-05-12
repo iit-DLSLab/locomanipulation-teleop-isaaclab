@@ -5,7 +5,9 @@
 </div>
 
 ## Overview
-An IsaacLab extension by DLS for performing teleoperation with Unitree Go2 + AgileX Piper
+An IsaacLab extension by DLS for performing teleoperation with Unitree Go2 + AgileX Piper.
+
+Status: Work in progress - the train is based still on Aliengo, but it works on Go2. Arm IK can be sometimes jittering in some configuration.
 
 Features:
 - Locomotion policy able to adjust pose and carry a manipulator
