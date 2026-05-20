@@ -19,7 +19,7 @@ class Console():
         # Autocomplete setup
         self.commands = [
             "help", "ictp", "goUp", "goDown", "activateRL", "activateArm",  "ictp", "setKp", "setKd",
-            "setBasePose"
+            "setBasePose", "setEefPose",
         ]
         readline.set_completer(self.complete)
         readline.parse_and_bind("tab: complete")
@@ -213,6 +213,45 @@ class Console():
                     temp = input("Enter Height (m): ")
                     if(temp != ""):
                         self.controller_node.desired_pose_command_overwrite[1] = float(temp)  
+                elif input_string == "setEefPose":
+                    # set desired end-effector pose performs IK to compute the corresponding joint positions and set them as desired
+                    temp_x = input("Enter Target X Position (m): ")
+                    temp_y = input("Enter Target Y Position (m): ")
+                    temp_z = input("Enter Target Z Position (m): ")
+
+                    temp_x = float(temp_x) if temp_x != "" else 0.3
+                    temp_y = float(temp_y) if temp_y != "" else 0.0
+                    temp_z = float(temp_z) if temp_z != "" else 0.3
+
+                    if temp_x != "" and temp_y != "" and temp_z != "":
+                        target_pos = np.array([float(temp_x), float(temp_y), float(temp_z)])
+                        
+                        temp_qw = input("Enter Target W Orientation (quaternion w) [default 1.0]: ")
+                        temp_qx = input("Enter Target X Orientation (quaternion x) [default 0.0]: ")
+                        temp_qy = input("Enter Target Y Orientation (quaternion y) [default 0.0]: ")
+                        temp_qz = input("Enter Target Z Orientation (quaternion z) [default 0.0]: ")
+                        
+                        qw = float(temp_qw) if temp_qw != "" else 1.0
+                        qx = float(temp_qx) if temp_qx != "" else 0.0
+                        qy = float(temp_qy) if temp_qy != "" else 0.0
+                        qz = float(temp_qz) if temp_qz != "" else 0.0
+                        target_quat = np.array([qw, qx, qy, qz])
+
+                        initial_joints_position = copy.deepcopy(self.controller_node.arm_joints_position)
+                        initial_base_pose = copy.deepcopy(getattr(self.controller_node, 'desired_pose_command', getattr(self.controller_node, 'desired_pose_command_overwrite', np.zeros(2))))
+
+                        reference_base_pose, reference_joints_position, ik_succeded = self.controller_node.ik_mink_solver.compute(
+                            target_pos, target_quat, initial_joints_position, initial_base_pose, optimize_height=False, optimize_pitch=False)
+
+                        if ik_succeded:
+                            print("IK Succeeded. Setting desired arm joints.")
+                            self.controller_node.desired_joint_pos_arm = reference_joints_position
+                            if not self.isArmActivated:
+                                print("Note: Arm is not activated. Use 'activateArm' command to execute.")
+                        else:
+                            print("IK Failed to find a solution.")
+                    else:
+                        print("Invalid input. X, Y, and Z positions are required.")
 
                 elif input_string =="armHome":
                     self.controller_node.state_machine.armHome(self.controller_node.arm_joints_position)
