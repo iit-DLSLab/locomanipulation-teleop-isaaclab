@@ -37,12 +37,15 @@ This work takes a lot of inspiration from our repo [trash-collection-isaaclab](h
 #### [BinWalker: Development and Field Evaluation of a Quadruped Manipulator Platform for Sustainable Litter Collection](https://arxiv.org/pdf/2603.10529)
 
 ```
-@article{turrisi26littercollection,
-  author = {Giulio Turrisi and Angelo Bratta and Giovanni Minelli and Gabriel Fischer Abati and Amir H. Rad and João Carlos Virgolino Soares and Claudio Semini},
-  title = {BinWalker: Development and Field Evaluation of a Quadruped Manipulator Platform for Sustainable Litter Collection},
-  journal = {arXiv},
-  year = {2026}
-}
+@INPROCEEDINGS{turrisi26littercollection,
+  author={Turrisi, Giulio and Bratta, Angelo and Minelli, Giovanni and Abati, Gabriel Fischer and Rad, Amir H. and Virgolino Soares, João Carlos and Semini, Claudio},
+  booktitle={2026 IEEE/ASME International Conference on Advanced Intelligent Mechatronics (AIM)}, 
+  title={BinWalker: Development and Field Evaluation of a Quadruped Manipulator Platform for Sustainable Litter Collection}, 
+  year={2026},
+  volume={},
+  number={},
+  pages={1-8},
+  doi={10.1109/AIM65483.2026.11658311}}
 ```
 
 
