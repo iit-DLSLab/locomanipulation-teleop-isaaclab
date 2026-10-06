@@ -309,13 +309,19 @@ class LocomotionManipulationEnv(DirectRLEnv):
         if not source_robot_prim.IsValid():
             raise RuntimeError(f"Cannot disable arm collisions: invalid robot prim '{source_robot_path}'.")
 
+        # bodies may be nested (e.g. Robot/Geometry/base/link1/...), so look them up by name
+        rigid_bodies = {
+            prim.GetName(): prim
+            for prim in Usd.PrimRange(source_robot_prim)
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        }
         arm_body_prims = []
         for body_name in self._ARM_BODY_NAMES:
-            body_path = f"{source_robot_path}/{body_name}"
-            body_prim = self.scene.stage.GetPrimAtPath(body_path)
-            if not body_prim.IsValid() or not body_prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                raise RuntimeError(f"Cannot disable arm collisions: invalid rigid body prim '{body_path}'.")
-            arm_body_prims.append(body_prim)
+            if body_name not in rigid_bodies:
+                raise RuntimeError(
+                    f"Cannot disable arm collisions: rigid body '{body_name}' not found under '{source_robot_path}'."
+                )
+            arm_body_prims.append(rigid_bodies[body_name])
 
         # The arm must not touch the terrain nor the quadruped. With Isaac Lab 3, a
         # physics:filteredPairs relationship towards the terrain crashes PhysX on mesh
