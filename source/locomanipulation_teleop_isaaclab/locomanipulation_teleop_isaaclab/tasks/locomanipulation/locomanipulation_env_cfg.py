@@ -368,7 +368,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "velocity_commands": (0.01, 0.01),
         "pose_commands": (0.01, 0.01),
         "joint_pos": (0.01, 0.01),
-        "joint_vel": (0.05, 0.01),
+        "joint_vel": (0.1, 0.01),
         "actions": (0.01, 0.01),
         "clock": (0.01, 0.01),
         "arm_joint_pos": (0.01, 0.01),
