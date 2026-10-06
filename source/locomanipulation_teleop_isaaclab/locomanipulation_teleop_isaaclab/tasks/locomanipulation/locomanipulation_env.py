@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import gymnasium as gym
 import torch
-from pxr import Sdf, UsdPhysics
+from pxr import Usd, UsdPhysics
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -17,10 +17,12 @@ from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns, Imu
+from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns, Imu, Pva, PvaCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
+
+from isaaclab import cloner
 
 from locomanipulation_teleop_isaaclab.tasks import custom_observations, custom_rewards, custom_events
 from locomanipulation_teleop_isaaclab.tasks.supervised_learning_networks import FrozenRandomMlpEncoder, create_supervised_network
@@ -166,6 +168,17 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._ids_only_legs_joints_order = self._robot.find_joints(name_keys=self.cfg.desired_joints_order[0:12], preserve_order=True)[0]
         self._ids_only_arms_joints_order = self._robot.find_joints(name_keys=self.cfg.desired_joints_order[12:18], preserve_order=True)[0]
 
+        # Nominal (pre-randomization) explicit-actuator PD gains. Captured here, before any
+        # "reset" mode event has run, since asset.data.default_joint_stiffness/damping is a
+        # deprecated live snapshot that reads 0 for explicit actuators like PaceDCMotor
+        # (the solver's own PD gains are zeroed; the actuator computes effort in Python).
+        self._nominal_actuator_stiffness = {}
+        self._nominal_actuator_damping = {}
+        for joint_type in ("hip", "thigh", "calf"):
+            actuator = self._robot.actuators[joint_type]
+            self._nominal_actuator_stiffness[joint_type] = actuator.stiffness.clone()
+            self._nominal_actuator_damping[joint_type] = actuator.damping.clone()
+
         if getattr(self.cfg, "visualize_edge_map", False):
             self.set_debug_vis(True)
 
@@ -175,25 +188,69 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        # we add a height scanner for perceptive locomotion
-        self._height_scanner = RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["height_scanner"] = self._height_scanner
+        # Keep the base-centered scanner for base-height and terrain-orientation terms.
+        self._pose_height_scanner = RayCaster(self.cfg.pose_height_scanner)
+        self.scene.sensors["pose_height_scanner"] = self._pose_height_scanner
+
+        # Use one small height map centered on each foot for the clearance rewards.
+        self._foot_height_scanners = []
+        for foot_name in ("FL_foot", "FR_foot", "RL_foot", "RR_foot"):
+            # Preserve the configured hierarchy, replacing the leg prefix in each link.
+            leg_prefix = foot_name.split("_", 1)[0]
+            scanner_cfg = self.cfg.foot_height_scanner.replace(
+                prim_path=self.cfg.foot_height_scanner.prim_path.replace("FL_", f"{leg_prefix}_"),
+                visualizer_cfg=self.cfg.foot_height_scanner.visualizer_cfg.replace(
+                    prim_path=f"/Visuals/{foot_name}HeightScanner"
+                ),
+            )
+            scanner = RayCaster(scanner_cfg)
+            self.scene.sensors[f"{foot_name.lower()}_height_scanner"] = scanner
+            self._foot_height_scanners.append(scanner)
+
+        # Add the perceptive and edge scanners only for vision-based locomotion.
+        if(getattr(self.cfg, "use_vision", False)):
+            self._perceptive_height_scanner = RayCaster(self.cfg.perceptive_height_scanner)
+            self.scene.sensors["perceptive_height_scanner"] = self._perceptive_height_scanner
+
+            self._edge_height_scanner = RayCaster(self.cfg.edge_height_scanner)
+            self.scene.sensors["edge_height_scanner"] = self._edge_height_scanner
 
         # we add an imu
         self._imu = Imu(self.cfg.imu)
         self.scene.sensors["imu"] = self._imu
 
+        # Report ideal projected gravity in the same frame as the IMU measurements.
+        self._pva = Pva(PvaCfg(
+            prim_path=self.cfg.imu.prim_path,
+            update_period=self.cfg.imu.update_period,
+            offset=PvaCfg.OffsetCfg(
+                pos=self.cfg.imu.offset.pos,
+                rot=self.cfg.imu.offset.rot,
+            ),
+        ))
+        self.scene.sensors["pva"] = self._pva
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
-        # Filter arm contacts with the terrain and the quadruped on the source
-        # environment. The relationships are inherited by all cloned environments.
+        # Disable arm contacts on the source environment before it is cloned.
         self._disable_arm_terrain_and_quadruped_collisions()
         
-        # clone, filter, and replicate
-        self.scene.clone_environments(copy_from_source=False)
-        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        # clone and replicate environments
+        src, dest = "/World/envs/env_0", "/World/envs/env_{}"
+        positions = cloner.grid_transforms(
+            self.scene.num_envs, self.scene.cfg.env_spacing, device=self.device
+        )[0]
+        global_paths = (self.cfg.terrain.prim_path,)
+        plan = cloner.clone_plan_from_env_0(
+            src, dest, self.scene.num_envs, self.device, positions, global_paths=global_paths
+        )
+        cloner.replicate(plan, stage=self.scene.stage)
+
+        # PhysX replication requires explicit collision filtering between environments.
+        if "physx" in self.scene.physics_backend:
+            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -205,31 +262,25 @@ class LocomotionManipulationEnv(DirectRLEnv):
         source_robot_path = f"{self.scene.env_prim_paths[0]}/{robot_prim_name}"
         source_robot_prim = self.scene.stage.GetPrimAtPath(source_robot_path)
         if not source_robot_prim.IsValid():
-            raise RuntimeError(f"Cannot filter arm collisions: invalid robot prim '{source_robot_path}'.")
+            raise RuntimeError(f"Cannot disable arm collisions: invalid robot prim '{source_robot_path}'.")
 
         arm_body_prims = []
         for body_name in self._ARM_BODY_NAMES:
             body_path = f"{source_robot_path}/{body_name}"
             body_prim = self.scene.stage.GetPrimAtPath(body_path)
             if not body_prim.IsValid() or not body_prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                raise RuntimeError(f"Cannot filter arm collisions: invalid rigid body prim '{body_path}'.")
+                raise RuntimeError(f"Cannot disable arm collisions: invalid rigid body prim '{body_path}'.")
             arm_body_prims.append(body_prim)
 
-        quadruped_body_paths = [
-            prim.GetPath()
-            for prim in source_robot_prim.GetChildren()
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI) and prim.GetName() not in self._ARM_BODY_NAMES
-        ]
-        if not quadruped_body_paths:
-            raise RuntimeError(f"Cannot filter arm collisions: no quadruped rigid bodies found below '{source_robot_path}'.")
-
-        filtered_target_paths = [Sdf.Path(self.cfg.terrain.prim_path), *quadruped_body_paths]
-
+        # The arm must not touch the terrain nor the quadruped. With Isaac Lab 3, a
+        # physics:filteredPairs relationship towards the terrain crashes PhysX on mesh
+        # terrains and is dropped by Newton (each env is built from the env_0 robot
+        # subtree only), so the arm colliders are disabled instead. This also removes
+        # arm self-collisions, the only contacts the arm had left in this scene.
         for body_prim in arm_body_prims:
-            filtered_pairs_api = UsdPhysics.FilteredPairsAPI.Apply(body_prim)
-            filtered_pairs_rel = filtered_pairs_api.CreateFilteredPairsRel()
-            for target_path in filtered_target_paths:
-                filtered_pairs_rel.AddTarget(target_path)
+            for prim in Usd.PrimRange(body_prim):
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_previous_actions = self._previous_actions.clone()
@@ -279,12 +330,12 @@ class LocomotionManipulationEnv(DirectRLEnv):
             # If concurrent SE/Learned State Estimator, we predict linear and angular vel from IMU
             base_linear = custom_observations._get_concurrent_state_estimation(self)
             base_ang_vel = self._imu.data.ang_vel_b
-            projected_gravity_b = self._imu.data.projected_gravity_b
+            projected_gravity_b = self._pva.data.projected_gravity_b
         elif(self.cfg.use_imu):
             # Using directly the IMU
             base_linear = self._imu.data.lin_acc_b
             base_ang_vel = self._imu.data.ang_vel_b
-            projected_gravity_b = self._imu.data.projected_gravity_b
+            projected_gravity_b = self._pva.data.projected_gravity_b
         else:
             #Using a model-based state estimation
             base_linear = self._robot.data.root_lin_vel_b
@@ -323,7 +374,9 @@ class LocomotionManipulationEnv(DirectRLEnv):
         # Add heightmap data to obs if needed
         if(getattr(self.cfg, "use_vision", False)):
             height_data = (
-                self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5
+                self._perceptive_height_scanner.data.pos_w[:, 2].unsqueeze(1)
+                - self._perceptive_height_scanner.data.ray_hits_w[..., 2]
+                - 0.5
             )
             height_data = torch.nan_to_num(height_data, nan=0.0, posinf=1.0, neginf=-1.0)
             height_data = height_data.clip(-1.0, 1.0)
@@ -332,8 +385,10 @@ class LocomotionManipulationEnv(DirectRLEnv):
 
         # Critic OBS could be different if needed
         if(self.cfg.use_asymmetric_ppo):
-            obs_critic = custom_observations._get_privileged_observation(self)
+            obs_critic = custom_observations._get_privileged_observation_asymmetric(self)
             observations["critic"] = torch.cat((obs, obs_critic), dim=-1)
+        else:
+            observations["critic"] = obs
 
 
         # If RMA, we add some other predicted obs AFTER the critic asymmetric obs to avoid duplication
@@ -443,8 +498,16 @@ class LocomotionManipulationEnv(DirectRLEnv):
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
+        # Isaac Lab 3.0 compat: ids may arrive (or _ALL_INDICES may be) warp arrays
+        def _to_torch_ids(ids):
+            if ids is not None and not torch.is_tensor(ids):
+                import warp as wp
+                ids = wp.to_torch(ids)
+            return ids.to(dtype=torch.long) if ids is not None else ids
+
+        env_ids = _to_torch_ids(env_ids)
         if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self._robot._ALL_INDICES
+            env_ids = _to_torch_ids(self._robot._ALL_INDICES)
 
 
         self._robot.reset(env_ids)
