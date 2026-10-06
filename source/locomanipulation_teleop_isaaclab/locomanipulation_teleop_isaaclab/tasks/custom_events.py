@@ -233,6 +233,56 @@ def randomize_joint_delay_model(
                 actuator.second_order_delay_filter[env_ids[:, None], actuator_joint_ids] = second_order_delay_filter
 
 
+def randomize_pace_actuator_delay(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    min_delay: int = 0,
+    max_delay: int | None = None,
+):
+    """Randomize integer delay (in simulation steps) for Pace actuators.
+
+    The sampled delay is applied per-environment at reset through each actuator's
+    ``update_time_lags`` method.
+    """
+    if min_delay < 0:
+        raise ValueError(f"min_delay must be >= 0, got {min_delay}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # If max_delay is not specified in the event params, use the maximum default
+    # max_delay declared in the Pace actuator configs attached to this asset.
+    if max_delay is None:
+        inferred_max_delay = 0
+        for actuator in asset.actuators.values():
+            actuator_cfg = getattr(actuator, "cfg", None)
+            actuator_max_delay = getattr(actuator_cfg, "max_delay", None)
+            if actuator_max_delay is not None:
+                inferred_max_delay = max(inferred_max_delay, int(actuator_max_delay))
+        max_delay = inferred_max_delay
+
+    if max_delay < min_delay:
+        raise ValueError(f"max_delay must be >= min_delay, got [{min_delay}, {max_delay}].")
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
+
+    if len(env_ids) == 0:
+        return
+
+    delays = torch.randint(
+        low=min_delay,
+        high=max_delay + 1,
+        size=(len(env_ids),),
+        dtype=torch.int,
+        device=asset.device,
+    )
+
+    for actuator in asset.actuators.values():
+        if hasattr(actuator, "update_time_lags"):
+            actuator.update_time_lags(delays, env_ids)
+
+
 def _sample_arm_trajectory(self, env_ids: torch.Tensor):
     """Sample a new arm target and trajectory timing for the selected environments."""
     num_envs = env_ids.shape[0]

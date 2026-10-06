@@ -189,8 +189,11 @@ def joints_energy_l1(self) -> torch.Tensor:
 
 
 def feet_air_time(self) -> torch.Tensor:
-    desired_contact_time = 0.47
-    desired_air_time = 0.25
+    # Derived from the (possibly per-env, velocity-ramped) step frequency and duty factor:
+    # contact_time = duty_factor / step_freq, air_time = (1 - duty_factor) / step_freq.
+    step_period = 1.0 / self._step_freq
+    desired_contact_time = self._duty_factor * step_period
+    desired_air_time = (1.0 - self._duty_factor) * step_period
 
     current_air_time = self._contact_sensor.data.current_air_time[
         :, self._feet_contact_sensor_ids
@@ -209,8 +212,8 @@ def feet_air_time(self) -> torch.Tensor:
 
     desired_time = torch.where(
         in_contact,
-        torch.full_like(current_time, desired_contact_time),
-        torch.full_like(current_time, desired_air_time),
+        desired_contact_time.expand_as(current_time),
+        desired_air_time.expand_as(current_time),
     )
 
     # From 0 to 1 until reach the target
@@ -220,10 +223,25 @@ def feet_air_time(self) -> torch.Tensor:
     )
 
     # After reaching the target, apply a penalty for exceeding the desired time
-    excess_penalty = torch.clamp(
+    #excess_penalty = torch.clamp(
+    #    (current_time - desired_time) / desired_time,
+    #    min=0.0,
+    #)
+
+    # Normalized excess time: 0 at target, 1 at twice the target time
+    excess_ratio = torch.clamp(
         (current_time - desired_time) / desired_time,
         min=0.0,
     )
+
+    # Increasingly steep penalty
+    alpha = 1.0  # penalty magnitude
+    beta = 2.0   # steepness
+
+    excess_penalty = alpha * torch.expm1(
+        torch.clamp(beta * excess_ratio, max=20.0)
+    )
+
 
     feet_reward_per_leg = bounded_reward - excess_penalty
 
@@ -237,7 +255,6 @@ def feet_air_time(self) -> torch.Tensor:
     should_move = torch.norm(self._velocity_commands[:, :3], dim=1) > 0.01
 
     return torch.sum(feet_reward_per_leg, dim=1) * should_move
-
 
 
 def feet_air_time_variance(self):
@@ -385,9 +402,10 @@ def feet_to_hip_distance_l2(self) -> torch.Tensor:
     ].unsqueeze(1)
     hip_to_base_h = torch.matmul(rot_w2h.transpose(1, 2), hip_to_base_w.transpose(1, 2))
 
-    desired_hip_offset = self._desired_hip_offset
-    feet_to_hip_distance_x = torch.square(feet_to_base_h[:, 0] - hip_to_base_h[:, 0])
-    feet_to_hip_distance_y = torch.square(feet_to_base_h[:, 1] + desired_hip_offset.unsqueeze(0) - hip_to_base_h[:, 1])
+    desired_hip_offset_y = self._desired_hip_offset_y
+    desired_hip_offset_x = self._desired_hip_offset_x
+    feet_to_hip_distance_x = torch.square(feet_to_base_h[:, 0] + desired_hip_offset_x.unsqueeze(0) - hip_to_base_h[:, 0])
+    feet_to_hip_distance_y = torch.square(feet_to_base_h[:, 1] + desired_hip_offset_y.unsqueeze(0) - hip_to_base_h[:, 1])
     feet_to_hip_distance = -torch.mean(torch.sqrt(feet_to_hip_distance_x + feet_to_hip_distance_y), dim=1)
     feet_to_hip_distance = feet_to_hip_distance * torch.where(
         should_move, torch.ones_like(feet_to_hip_distance), torch.full_like(feet_to_hip_distance, 3.0)

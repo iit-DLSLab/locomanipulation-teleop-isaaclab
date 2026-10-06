@@ -109,7 +109,16 @@ class EventCfg:
             "distribution": "uniform",
         },
     )
-    
+
+    randomize_pace_actuator_delay = EventTerm(
+        func=custom_events.randomize_pace_actuator_delay,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "min_delay": 0,
+        },
+    )
+
     # interval
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
@@ -147,6 +156,8 @@ class PhysicsCfg(PresetCfg):
 class Go2FlatEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
+    terrain_curriculum_move_up_error_percent = 20.0
+    terrain_curriculum_move_down_error_percent = 50.0
     decimation = 4
     action_scale = 0.5
 
@@ -213,18 +224,16 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     use_rma = False
     if(use_rma):
         rma_network_type = "mlp" # "mlp" or "tcn"
-        rma_use_latent_space = False
+        rma_use_latent_space = True
         if(rma_use_latent_space):
             rma_latent_space = 8
             rma_latent_encoder_hidden_features = 128
             rma_latent_encoder_seed = 0
-        
+
         rma_privileged_observation_space = 12 # P gain
         rma_privileged_observation_space += 12 # D gain
-        rma_privileged_observation_space += 3 # clean linear velocity
-        rma_privileged_observation_space += 1 # base height error
-        rma_privileged_observation_space += 1 # terrain pitch
-        rma_privileged_observation_space += 4 # foot contacts
+        rma_privileged_observation_space += 12 # static friction (legs)
+        rma_privileged_observation_space += 12 # viscous friction (legs)
 
         rma_output_space = rma_latent_space if rma_use_latent_space else rma_privileged_observation_space
         observation_space += rma_output_space
@@ -345,11 +354,27 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
         bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
-    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
+    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset.
+    # The std is set separately for each observation term with observation_noise_std
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.02, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.001, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, operation="abs"),
     )
+    # (noise std, bias std) for each observation term
+    observation_noise_std = {
+        "base_linear": (0.05, 0.001),
+        "base_ang_vel": (0.05, 0.001),
+        "projected_gravity": (0.05, 0.001),
+        "velocity_commands": (0.01, 0.001),
+        "pose_commands": (0.01, 0.001),
+        "joint_pos": (0.01, 0.001),
+        "joint_vel": (0.05, 0.001),
+        "actions": (0.01, 0.001),
+        "clock": (0.01, 0.001),
+        "arm_joint_pos": (0.01, 0.001),
+        "height_map": (0.02, 0.001),
+        "rma": (0.02, 0.001),
+    }
 
     # robot
     robot: ArticulationCfg = GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -410,7 +435,8 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     
     feet_to_hip_distance_reward_scale = 2.5
     # This is used in loocmotion_env.py for the above reward
-    desired_hip_offset = 0.12
+    desired_hip_offset_y = 0.12
+    desired_hip_offset_x = 0.0
 
     feet_edge_reward_scale = 0.0
     feet_edge_height_threshold = 0.05
@@ -426,6 +452,11 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
+    # The step freq ramps linearly with the commanded xy linear velocity norm,
+    # from desired_step_freq (at step_freq_vel_norm_low) to desired_step_freq_max (at step_freq_vel_norm_high)
+    desired_step_freq_max = 1.8
+    step_freq_vel_norm_low = 0.4
+    step_freq_vel_norm_high = 0.8
     desired_phase_offset = [0.0, 0.5, 0.5, 0.0] #FL, FR, RL, RR
 
     stance_contact_suggestion_reward_scale = 0.5

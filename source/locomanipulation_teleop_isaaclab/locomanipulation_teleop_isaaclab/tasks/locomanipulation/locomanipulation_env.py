@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import gymnasium as gym
 import torch
 from pxr import Usd, UsdPhysics
@@ -21,6 +22,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCast
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
+from isaaclab.utils.noise import NoiseModel
 
 from isaaclab import cloner
 
@@ -33,6 +35,7 @@ class LocomotionManipulationEnv(DirectRLEnv):
     _ARM_BODY_NAMES = tuple(f"link{i}" for i in range(1, 9))
 
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
+        self._edge_map_visualizer = None
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -63,10 +66,14 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._swing_peak_periodic = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs,1)
         
         # Desired Hip Offset
-        self._desired_hip_offset = torch.tensor([-self.cfg.desired_hip_offset, self.cfg.desired_hip_offset, -self.cfg.desired_hip_offset, self.cfg.desired_hip_offset], device=self.device)
-        
+        self._desired_hip_offset_y = torch.tensor([-self.cfg.desired_hip_offset_y, self.cfg.desired_hip_offset_y, -self.cfg.desired_hip_offset_y, self.cfg.desired_hip_offset_y], device=self.device)
+        self._desired_hip_offset_x = torch.tensor([-self.cfg.desired_hip_offset_x, -self.cfg.desired_hip_offset_x, self.cfg.desired_hip_offset_x, self.cfg.desired_hip_offset_x], device=self.device)
+
         # Periodic gait
-        self._step_freq = torch.tensor(self.cfg.desired_step_freq, device=self.device)
+        # Step frequency ramps linearly with the commanded xy linear velocity norm, from
+        # cfg.desired_step_freq (at/below cfg.step_freq_vel_norm_low) up to
+        # cfg.desired_step_freq_max (at/above cfg.step_freq_vel_norm_high). See _get_observations().
+        self._step_freq = torch.full((self.num_envs, 1), self.cfg.desired_step_freq, device=self.device)
         self._duty_factor = torch.tensor(self.cfg.desired_duty_factor, device=self.device)
         self._phase_offset = torch.tensor(self.cfg.desired_phase_offset, device=self.device).repeat(self.num_envs,1)
         self._phase_signal = self._phase_offset.clone()# + self.step_dt * self._step_freq * torch.rand(self.num_envs, 1, device=self.device)*10.
@@ -95,10 +102,6 @@ class LocomotionManipulationEnv(DirectRLEnv):
                 )
                 self._rma_latent_encoder.to(self.device)
             self._observation_history_rma = torch.zeros(self.num_envs, cfg.rma_history_length, cfg.single_rma_observation_space, device=self.device)
-            if self.cfg.observation_noise_model:
-                self._observation_noise_model_rma: NoiseModel = self.cfg.observation_noise_model.class_type(
-                    self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
-                )
 
         # Learned State Estimator
         if(cfg.use_concurrent_state_est == True):
@@ -110,11 +113,43 @@ class LocomotionManipulationEnv(DirectRLEnv):
             )
             self._concurrent_state_est_network.to(self.device)
             self._observation_history_concurrent_state_est = torch.zeros(self.num_envs, cfg.concurrent_state_est_history_length, cfg.single_concurrent_state_est_observation_space, device=self.device)
-            if self.cfg.observation_noise_model:
-                self._observation_noise_model_concurrent_state_est: NoiseModel = self.cfg.observation_noise_model.class_type(
-                    self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
-                )
 
+        # Observation noise with a separate std for each term, see cfg.observation_noise_std.
+        # The terms must follow the same order used to build the observations
+        if self.cfg.observation_noise_model:
+            num_leg_joints = cfg.action_space
+            num_arm_joints = len(cfg.desired_joints_order) - num_leg_joints
+            proprio_terms_before_clock = [
+                ("base_linear", 3),
+                ("base_ang_vel", 3),
+                ("projected_gravity", 3),
+                ("velocity_commands", 3),
+                ("pose_commands", 2),
+                ("joint_pos", num_leg_joints),
+                ("joint_vel", num_leg_joints),
+                ("actions", num_leg_joints),
+            ]
+            proprio_terms_after_clock = [("arm_joint_pos", num_arm_joints)]
+            proprio_terms = proprio_terms_before_clock + proprio_terms_after_clock
+            policy_terms = (
+                proprio_terms_before_clock
+                + [("clock", 4 if cfg.use_clock_signal else 0)]
+                + proprio_terms_after_clock
+            ) * cfg.history_length
+            # the height map takes whatever is left of the observation space
+            rma_size = cfg.rma_output_space if cfg.use_rma else 0
+            height_map_size = cfg.observation_space - sum(size for _, size in policy_terms) - rma_size
+            policy_terms += [("height_map", height_map_size), ("rma", rma_size)]
+
+            self._observation_noise_model = self._make_observation_noise_model(policy_terms)
+            if cfg.use_rma:
+                self._observation_noise_model_rma = self._make_observation_noise_model(
+                    proprio_terms * cfg.rma_history_length
+                )
+            if cfg.use_concurrent_state_est:
+                self._observation_noise_model_concurrent_state_est = self._make_observation_noise_model(
+                    proprio_terms * cfg.concurrent_state_est_history_length
+                )
 
         # Logging
         self._episode_sums = {
@@ -154,6 +189,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
                 "stance_contact_suggestion",
             ]
         }
+        # Per-environment velocity-tracking error used by the terrain curriculum.
+        # Accumulating both the L1 error and command magnitude gives a stable
+        # episode-level percentage even when individual commands are small.
+        self._lin_vel_l1_error_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._lin_vel_command_l1_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         # Get specific body indices
         self._base_contact_sensor_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_contact_sensor_ids, _ = self._contact_sensor.find_bodies(["FL_foot", "FR_foot", "RL_foot", "RR_foot"], preserve_order=True)
@@ -178,6 +218,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
             actuator = self._robot.actuators[joint_type]
             self._nominal_actuator_stiffness[joint_type] = actuator.stiffness.clone()
             self._nominal_actuator_damping[joint_type] = actuator.damping.clone()
+
+        # Same reasoning for joint friction: avoid relying on the deprecated
+        # default_joint_friction_coeff/default_joint_viscous_friction_coeff snapshot semantics.
+        self._nominal_static_friction = self._robot.data.joint_friction_coeff.torch.clone()
+        self._nominal_viscous_friction = self._robot.data.joint_viscous_friction_coeff.torch.clone()
 
         if getattr(self.cfg, "visualize_edge_map", False):
             self.set_debug_vis(True)
@@ -307,6 +352,20 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._robot.set_joint_position_target(processed_actions_with_arm)
 
 
+    def _make_observation_noise_model(self, terms: list[tuple[str, int]]) -> NoiseModel:
+        # Expand the (noise std, bias std) of each term to one value per observation dimension
+        noise_std = [self.cfg.observation_noise_std[name][0] for name, size in terms for _ in range(size)]
+        bias_std = [self.cfg.observation_noise_std[name][1] for name, size in terms for _ in range(size)]
+
+        noise_model_cfg = copy.deepcopy(self.cfg.observation_noise_model)
+        noise_model_cfg.noise_cfg.std = torch.tensor(noise_std, device=self.device)
+        noise_model_cfg.bias_noise_cfg.std = torch.tensor(bias_std, device=self.device)
+        noise_model = noise_model_cfg.class_type(noise_model_cfg, num_envs=self.num_envs, device=self.device)
+
+        # A first call sizes the bias to the observation, otherwise the first reset fails
+        noise_model(torch.zeros(self.num_envs, len(noise_std), device=self.device))
+        return noise_model
+
     def _get_observations(self) -> dict:
         
         # Sample new commands if needed
@@ -317,6 +376,17 @@ class LocomotionManipulationEnv(DirectRLEnv):
         # Observation --------------------------------------------------------------------------------------
         clock_data = None
         if(self.cfg.use_clock_signal):
+            # Ramp the step frequency linearly with the commanded xy linear velocity norm:
+            # cfg.desired_step_freq below cfg.step_freq_vel_norm_low, cfg.desired_step_freq_max
+            # above cfg.step_freq_vel_norm_high, linear in between.
+            cmd_lin_vel_xy_norm = torch.norm(self._velocity_commands[:, :2], dim=1, keepdim=True)
+            ramp = (cmd_lin_vel_xy_norm - self.cfg.step_freq_vel_norm_low) / (
+                self.cfg.step_freq_vel_norm_high - self.cfg.step_freq_vel_norm_low
+            )
+            ramp = torch.clamp(ramp, 0.0, 1.0)
+            self._step_freq = self.cfg.desired_step_freq + ramp * (self.cfg.desired_step_freq_max - self.cfg.desired_step_freq)
+
+            # Increment the phase signal by the step frequency and wrap to [0, 1)
             self._phase_signal += self.step_dt * self._step_freq
             self._phase_signal = self._phase_signal % 1.0
             clock_data = torch.vstack([self._phase_signal[:,0], self._phase_signal[:,1], self._phase_signal[:,2], self._phase_signal[:,3]]).T
@@ -485,6 +555,13 @@ class LocomotionManipulationEnv(DirectRLEnv):
         # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
+        lin_vel_command_l1 = torch.sum(torch.abs(self._velocity_commands[:, :2]), dim=1)
+        tracks_linear_command = lin_vel_command_l1 > 0.01
+        lin_vel_l1_error = torch.sum(
+            torch.abs(self._velocity_commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1
+        )
+        self._lin_vel_l1_error_sum += lin_vel_l1_error * tracks_linear_command
+        self._lin_vel_command_l1_sum += lin_vel_command_l1 * tracks_linear_command
         return reward
 
 
@@ -509,6 +586,28 @@ class LocomotionManipulationEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = _to_torch_ids(self._robot._ALL_INDICES)
 
+        lin_vel_command_l1_sum = self._lin_vel_command_l1_sum[env_ids]
+        has_linear_velocity_commands = lin_vel_command_l1_sum > 0.0
+        lin_vel_l1_error_percent = 100.0 * self._lin_vel_l1_error_sum[env_ids] / torch.clamp(
+            lin_vel_command_l1_sum, min=1.0e-6
+        )
+
+        if(self._terrain.cfg.terrain_generator is not None and self._terrain.cfg.terrain_generator.curriculum == True):
+            # The command changes during an episode, so displacement from the
+            # origin is not a reliable measure of tracking quality. Use the
+            # episode-level linear-velocity L1 error relative to the commands.
+            move_up = torch.logical_and(
+                has_linear_velocity_commands,
+                lin_vel_l1_error_percent
+                < getattr(self.cfg, "terrain_curriculum_move_up_error_percent", 20.0),
+            )
+            move_down = torch.logical_and(
+                has_linear_velocity_commands,
+                lin_vel_l1_error_percent
+                > getattr(self.cfg, "terrain_curriculum_move_down_error_percent", 50.0),
+            )
+            # update terrain levels
+            self._terrain.update_env_origins(env_ids, move_up, move_down)
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
@@ -577,6 +676,9 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
+        extras["Episode_Metric/lin_vel_l1_error_percent"] = torch.sum(lin_vel_l1_error_percent) / torch.clamp(
+            torch.count_nonzero(has_linear_velocity_commands), min=1
+        )
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         
@@ -584,3 +686,14 @@ class LocomotionManipulationEnv(DirectRLEnv):
             extras["Episode_Curriculum/terrain_levels"] = torch.mean(self._terrain.terrain_levels.float())
         
         self.extras["log"].update(extras)
+
+        self._lin_vel_l1_error_sum[env_ids] = 0.0
+        self._lin_vel_command_l1_sum[env_ids] = 0.0
+
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        custom_rewards._set_debug_vis_impl(self, debug_vis)
+
+
+    def _debug_vis_callback(self, event):
+        custom_rewards._debug_vis_callback(self, event)
