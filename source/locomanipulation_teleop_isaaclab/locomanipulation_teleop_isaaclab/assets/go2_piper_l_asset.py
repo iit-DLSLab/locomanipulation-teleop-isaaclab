@@ -91,7 +91,7 @@ PIPER_ARM_ACTUATOR_CFG = PaceDCMotorCfg(
 
 GO2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ISAAC_ASSET_DIR}/go2_piper_l.usd",
+        usd_path=f"{ISAAC_ASSET_DIR}/../../../../robot_model/go2_piper_l.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

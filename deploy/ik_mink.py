@@ -29,7 +29,7 @@ class KeyCallback:
 
 class IKMink:
     def __init__(self) -> None:
-        self.model = mujoco.MjModel.from_xml_path(dir_path+"/mujoco/models/scene_floating.xml")
+        self.model = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_floating.xml")
         self.data = mujoco.MjData(self.model)
 
         # Joints we wish to control.

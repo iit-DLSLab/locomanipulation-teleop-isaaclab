@@ -56,7 +56,7 @@ import time
 import numpy as np
 import copy
 dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(dir_path+"/mujoco/")
+sys.path.append(dir_path+"/mujoco_utils/")
 sys.path.append(dir_path+"/../")
 
 # Gym and Simulation related imports
@@ -73,7 +73,7 @@ class MujocoSimulationNode(Node):
         self.simulation_dt = 0.002
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/mujoco/models/scene_flat.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_flat.xml")
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "down")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]

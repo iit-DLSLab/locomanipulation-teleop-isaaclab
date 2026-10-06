@@ -7,7 +7,7 @@ import numpy as np
 import sys
 import os 
 file_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(file_path+"/mujoco/")
+sys.path.append(file_path+"/mujoco_utils/")
 sys.path.append(file_path+"/../")
 sys.path.append(file_path+"/../scripts/rsl_rl")
 
@@ -36,7 +36,7 @@ class PlayMujoco:
 
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(file_path + "/mujoco/models/scene_rough.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(file_path + "/../robot_model/scene_rough.xml")
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "home")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]

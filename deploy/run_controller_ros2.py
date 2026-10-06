@@ -61,7 +61,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(dir_path+"/mujoco/")
+sys.path.append(dir_path+"/mujoco_utils/")
 sys.path.append(dir_path+"/../")
 sys.path.append(dir_path+"/../scripts/rsl_rl")
 
@@ -97,14 +97,14 @@ class LocoManipulationTeleopControlNode(Node):
         self.simulation_dt = 0.002
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/mujoco/models/scene_rough.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_rough.xml")
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "home")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]
         
         self.use_ik_visualizer = True
         if self.use_ik_visualizer:
-            self.visualizer_model = mujoco.MjModel.from_xml_path(dir_path+"/mujoco/models/scene_floating.xml")
+            self.visualizer_model = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_floating.xml")
             self.visualizer_data = mujoco.MjData(self.visualizer_model)
             self.viewer = mujoco.viewer.launch_passive(
                             self.visualizer_model,
