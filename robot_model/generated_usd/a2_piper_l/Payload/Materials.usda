@@ -1,0 +1,284 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "a2_piper_l"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "a2_piper_l"
+{
+    def Scope "Materials"
+    {
+        def Material "gray" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/gray>
+        )
+        {
+        }
+
+        def Material "black" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/black>
+        )
+        {
+        }
+    }
+
+    over "Geometry"
+    {
+        over "base"
+        {
+            over "base_link" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                rel material:binding = </a2_piper_l/Materials/gray>
+            }
+
+            over "Box_5" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                rel material:binding = </a2_piper_l/Materials/gray>
+            }
+
+            over "piper_base_link" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                rel material:binding = </a2_piper_l/Materials/gray>
+            }
+
+            over "FL_hip"
+            {
+                over "left_front_Link1" (
+                    prepend apiSchemas = ["MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding = </a2_piper_l/Materials/gray>
+                }
+
+                over "FL_thigh"
+                {
+                    over "left_front_Link2" (
+                        prepend apiSchemas = ["MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding = </a2_piper_l/Materials/gray>
+                    }
+
+                    over "FL_calf"
+                    {
+                        over "left_front_Link3" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/gray>
+                        }
+
+                        over "left_front_Link4" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/black>
+                        }
+                    }
+                }
+            }
+
+            over "FR_hip"
+            {
+                over "right_front_Link1" (
+                    prepend apiSchemas = ["MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding = </a2_piper_l/Materials/gray>
+                }
+
+                over "FR_thigh"
+                {
+                    over "right_front_Link2" (
+                        prepend apiSchemas = ["MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding = </a2_piper_l/Materials/gray>
+                    }
+
+                    over "FR_calf"
+                    {
+                        over "right_front_Link3" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/gray>
+                        }
+
+                        over "right_front_Link4" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/black>
+                        }
+                    }
+                }
+            }
+
+            over "RL_hip"
+            {
+                over "left_hind_Link1" (
+                    prepend apiSchemas = ["MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding = </a2_piper_l/Materials/gray>
+                }
+
+                over "RL_thigh"
+                {
+                    over "left_hind_Link2" (
+                        prepend apiSchemas = ["MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding = </a2_piper_l/Materials/gray>
+                    }
+
+                    over "RL_calf"
+                    {
+                        over "left_hind_Link3" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/gray>
+                        }
+
+                        over "left_hind_Link4" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/black>
+                        }
+                    }
+                }
+            }
+
+            over "RR_hip"
+            {
+                over "right_hind_Link1" (
+                    prepend apiSchemas = ["MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding = </a2_piper_l/Materials/gray>
+                }
+
+                over "RR_thigh"
+                {
+                    over "right_hind_Link2" (
+                        prepend apiSchemas = ["MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding = </a2_piper_l/Materials/gray>
+                    }
+
+                    over "RR_calf"
+                    {
+                        over "right_hind_Link3" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/gray>
+                        }
+
+                        over "right_hind_Link4" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/black>
+                        }
+                    }
+                }
+            }
+
+            over "link1"
+            {
+                over "link1" (
+                    prepend apiSchemas = ["MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding = </a2_piper_l/Materials/gray>
+                }
+
+                over "link2"
+                {
+                    over "link2" (
+                        prepend apiSchemas = ["MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding = </a2_piper_l/Materials/gray>
+                    }
+
+                    over "link3"
+                    {
+                        over "link3" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </a2_piper_l/Materials/gray>
+                        }
+
+                        over "link4"
+                        {
+                            over "link4" (
+                                prepend apiSchemas = ["MaterialBindingAPI"]
+                            )
+                            {
+                                rel material:binding = </a2_piper_l/Materials/gray>
+                            }
+
+                            over "link5"
+                            {
+                                over "link5" (
+                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                )
+                                {
+                                    rel material:binding = </a2_piper_l/Materials/gray>
+                                }
+
+                                over "link6"
+                                {
+                                    over "gripper_base_100_v3" (
+                                        prepend apiSchemas = ["MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding = </a2_piper_l/Materials/gray>
+                                    }
+
+                                    over "link7"
+                                    {
+                                        over "link7" (
+                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                        )
+                                        {
+                                            rel material:binding = </a2_piper_l/Materials/gray>
+                                        }
+                                    }
+
+                                    over "link8"
+                                    {
+                                        over "link8" (
+                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                        )
+                                        {
+                                            rel material:binding = </a2_piper_l/Materials/gray>
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

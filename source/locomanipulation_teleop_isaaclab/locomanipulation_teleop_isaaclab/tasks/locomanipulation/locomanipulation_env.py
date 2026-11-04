@@ -28,7 +28,8 @@ from isaaclab.sim.spawners.from_files.from_files import spawn_from_usd_file
 
 from locomanipulation_teleop_isaaclab.tasks import custom_observations, custom_rewards, custom_events, custom_visualizations
 from locomanipulation_teleop_isaaclab.tasks.supervised_learning_networks import FrozenRandomMlpEncoder, create_supervised_network
-from .locomanipulation_env_cfg import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
+from .go2_piper_env_cfg import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
+from .a2_piper_env_cfg import A2FlatEnvCfg, A2RoughVisionEnvCfg, A2RoughBlindEnvCfg
 
 ARM_BODY_NAMES = tuple(f"link{i}" for i in range(1, 9))
 """The rigid bodies of the Piper arm."""

@@ -65,6 +65,8 @@ import mujoco.viewer
 import mujoco_utils
 from heightmap import HeightMap
 
+import config
+
 
 class MujocoSimulationNode(Node):
     def __init__(self):
@@ -73,7 +75,7 @@ class MujocoSimulationNode(Node):
         self.simulation_dt = 0.002
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_flat.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(config.robot_model_path)
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "down")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]

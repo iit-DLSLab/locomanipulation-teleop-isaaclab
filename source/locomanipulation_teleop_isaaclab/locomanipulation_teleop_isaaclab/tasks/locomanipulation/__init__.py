@@ -17,7 +17,7 @@ from . import agents
 from .locomanipulation_env import LocomotionManipulationEnv
 
 
-# Aliengo environments
+# Go2 + Piper environments
 from .locomanipulation_env import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
 
 gym.register(
@@ -46,6 +46,40 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": Go2RoughVisionEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
+    },
+)
+
+
+# A2 + Piper environments
+from .locomanipulation_env import A2FlatEnvCfg, A2RoughVisionEnvCfg, A2RoughBlindEnvCfg
+
+gym.register(
+    id="LocoManipulation-A2-Flat",
+    entry_point=LocomotionManipulationEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": A2FlatEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="LocoManipulation-A2-Rough-Blind",
+    entry_point=LocomotionManipulationEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": A2RoughBlindEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="LocoManipulation-A2-Rough-Vision",
+    entry_point=LocomotionManipulationEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": A2RoughVisionEnvCfg,
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
     },
 )

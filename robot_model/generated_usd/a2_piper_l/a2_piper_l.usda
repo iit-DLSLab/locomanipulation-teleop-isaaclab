@@ -1,0 +1,29 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "a2_piper_l"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "a2_piper_l" (
+    prepend apiSchemas = ["GeomModelAPI"]
+    assetInfo = {
+        string name = "a2_piper_l"
+    }
+    kind = "component"
+    prepend payload = @./Payload/Contents.usda@
+)
+{
+    float3[] extentsHint = [(-0.37507775, -0.22923286, 0.11866025), (0.3872476, 0.22923286, 1.0906246), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (-0.37702447, -0.23490301, 0.118), (0.39116636, 0.23490301, 1.0938736)]
+}
+
+def PhysicsScene "PhysicsScene" (
+    prepend payload = @./Payload/Contents.usda@</PhysicsScene>
+)
+{
+}
+
