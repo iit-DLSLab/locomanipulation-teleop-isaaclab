@@ -8,7 +8,7 @@ sys.path.append(dir_path+"/../scripts/rsl_rl")
 locomotion_policy_folder_path = dir_path + "/../tested_policies/arm_moving_clock"
 # ----------------------------------------------------------------------------------------------------------------
 
-Kp_walking = 20.0
+Kp_walking = 25.0 # as in training (identified Kp of the Go2 legs)
 Kd_walking = 1.5
 
 Kp_stand_up_and_down = 50.

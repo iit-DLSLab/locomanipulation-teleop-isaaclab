@@ -52,7 +52,8 @@ obs_space_names_actor = [
         "joints_pos",
         "joints_vel",
         "joints_pos",
-        "clock_data",
+        "clock_data", # periodic clock data (sin of the phase of each leg)
+        "clock_data", # periodic clock data (cos of the phase of each leg)
         "reflection_sign_flipping_scalar",
         "reflection_sign_flipping_scalar",
         "reflection_sign_flipping_scalar",
@@ -75,7 +76,8 @@ obs_space_names_critic = [
         "joints_pos",
         "joints_vel",
         "joints_pos",
-        "clock_data",
+        "clock_data", # periodic clock data (sin of the phase of each leg)
+        "clock_data", # periodic clock data (cos of the phase of each leg)
         "reflection_sign_flipping_scalar",
         "reflection_sign_flipping_scalar",
         "reflection_sign_flipping_scalar",

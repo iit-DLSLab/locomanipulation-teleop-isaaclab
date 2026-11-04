@@ -34,6 +34,10 @@ class LocomotionPolicyWrapper:
         self.RL_FREQ = 1./(config.training_env["sim"]["dt"]*config.training_env["decimation"])  # Hz, frequency of the RL controller
 
 
+        # Max change of the velocity command per second (m/s^2 and rad/s^2), so a step from keyboard or joystick becomes a ramp
+        self.max_cmd_acc = 1.0
+        self.filtered_cmd = np.zeros(3)  # vx, vy in the heading frame and yaw rate
+
         # RL controller initialization -------------------------------------------------------------
         self.action_scale = config.training_env["action_scale"]
         self.past_rl_actions = np.zeros(12) # only legs
@@ -50,16 +54,24 @@ class LocomotionPolicyWrapper:
         self.use_clock_signal = config.training_env["use_clock_signal"]
 
 
-        self.step_freq = 1.4
-        self.duty_factor = 0.65
-        self.phase_offset = np.array([0.0, 0.5, 0.5, 0.0])
-        self.phase_signal = self.phase_offset
+        # Step frequency ramps linearly with the commanded xy linear velocity norm, from desired_step_freq
+        # (at/below step_freq_vel_norm_low) up to desired_step_freq_max (at/above step_freq_vel_norm_high)
+        self.desired_step_freq = config.training_env["desired_step_freq"]
+        self.desired_step_freq_max = config.training_env["desired_step_freq_max"]
+        self.step_freq_vel_norm_low = config.training_env["step_freq_vel_norm_low"]
+        self.step_freq_vel_norm_high = config.training_env["step_freq_vel_norm_high"]
+        self.step_freq = self.desired_step_freq
+        self.duty_factor = config.training_env["desired_duty_factor"]
+        self.phase_offset = np.array(config.training_env["desired_phase_offset"])
+        self.phase_signal = self.phase_offset.copy()
 
 
         self.desired_clip_actions = config.training_env["desired_clip_actions"]
 
 
         self.use_filter_actions = config.training_env["use_filter_actions"]
+        self.action_filter_alpha = config.training_env["action_filter_alpha"]
+        self.filtered_rl_actions = np.zeros(12) # only legs
 
 
         self.use_observation_history = config.training_env["use_observation_history"]
@@ -69,16 +81,16 @@ class LocomotionPolicyWrapper:
             self._observation_history = np.zeros((self.history_length, single_observation_space), dtype=np.float32)
 
 
-        try:
-            self.use_vision = config.training_env["use_vision"]
-        except:
-            self.use_vision = False
+        # vision policies are the ones trained with the perceptive height scanner
+        self.use_vision = config.training_env.get("perceptive_height_scanner") is not None
 
         # Learned State Estimator
-        if(config.training_env["use_concurrent_state_est"] == True):
+        self.base_state_source = config.training_env["base_state_source"]
+        if(self.base_state_source == "concurrent_se"):
             self._concurrent_state_est_network = load_network(config.concurrent_state_est_network, device='cpu')
             single_concurrent_state_est_observation_space = int(config.training_env["single_concurrent_state_est_observation_space"])
-            self._observation_history_concurrent_state_est = np.zeros((self.history_length, single_concurrent_state_est_observation_space), dtype=np.float32)
+            concurrent_state_est_history_length = int(config.training_env["concurrent_state_est_history_length"])
+            self._observation_history_concurrent_state_est = np.zeros((concurrent_state_est_history_length, single_concurrent_state_est_observation_space), dtype=np.float32)
 
 
         # Desired joint vector
@@ -124,9 +136,11 @@ class LocomotionPolicyWrapper:
 
 
         # Update Observation ----------------------        
-        if(config.training_env["use_imu"] or config.training_env["use_concurrent_state_est"]):
+        if(self.base_state_source != "ground_truth"):
             base_projected_gravity = self._get_projected_gravity(imu_orientation)
-            base_linear = imu_linear_acceleration
+            # The IMU linear acceleration is not used: zeroed with "imu" as in training, replaced by the concurrent SE
+            # prediction with "concurrent_se"
+            base_linear = np.zeros(3)
             base_ang_vel = imu_angular_velocity
         else:
             base_projected_gravity = self._get_projected_gravity(base_quat_wxyz)
@@ -136,6 +150,13 @@ class LocomotionPolicyWrapper:
         
         # Get the reference base velocity in the world frame
         ref_base_lin_vel_h = heading_orientation_SO3.T@ref_base_lin_vel
+
+        # Rate limit the command
+        target_cmd = np.array([ref_base_lin_vel_h[0], ref_base_lin_vel_h[1], ref_base_ang_vel[2]])
+        max_delta = self.max_cmd_acc / self.RL_FREQ
+        self.filtered_cmd += np.clip(target_cmd - self.filtered_cmd, -max_delta, max_delta)
+        ref_base_lin_vel_h[0:2] = self.filtered_cmd[0:2]
+        ref_base_ang_vel = np.array([ref_base_ang_vel[0], ref_base_ang_vel[1], self.filtered_cmd[2]])
         
             
         # Fill the observation vector
@@ -154,17 +175,26 @@ class LocomotionPolicyWrapper:
 
         # Phase Signal
         if(self.use_clock_signal):
+            # Ramp the step frequency linearly with the commanded xy linear velocity norm, as in training
+            ramp = (np.linalg.norm(ref_base_lin_vel_h[0:2]) - self.step_freq_vel_norm_low) / (
+                self.step_freq_vel_norm_high - self.step_freq_vel_norm_low
+            )
+            ramp = np.clip(ramp, 0.0, 1.0)
+            self.step_freq = self.desired_step_freq + ramp * (self.desired_step_freq_max - self.desired_step_freq)
+
             self.phase_signal += self.step_freq * (1 / (self.RL_FREQ))
             self.phase_signal = self.phase_signal % 1.0
-            clock_data = copy.copy(self.phase_signal)
+            # While standing the phase is held at the phase offset, as in training
             commands = np.array([ref_base_lin_vel_h[0], ref_base_lin_vel_h[1], ref_base_ang_vel[2]], dtype=np.float32)
             if(np.linalg.norm(commands) < 0.01):
-                clock_data = np.array([-1.0, -1.0, -1.0, -1.0], dtype=np.float32)
+                self.phase_signal = self.phase_offset.copy()
+            # sin and cos of the phase of each leg, as in training: [sin FL..RR, cos FL..RR]
+            clock_data = np.concatenate((np.sin(2.0 * np.pi * self.phase_signal), np.cos(2.0 * np.pi * self.phase_signal))).astype(np.float32)
 
 
-        if(config.training_env["use_concurrent_state_est"] == True):
+        if(self.base_state_source == "concurrent_se"):
+            # as in training, the concurrent SE does not use the IMU linear acceleration
             obs_concurrent_state_est = np.concatenate([
-                base_linear, 
                 base_ang_vel, 
                 base_projected_gravity,
                 ref_base_lin_vel_h[0:2],
@@ -201,8 +231,8 @@ class LocomotionPolicyWrapper:
         
         
         obs = np.concatenate([
-            base_linear, # this could be imu linear acc if use_imu or linear vel from state est
-            base_ang_vel, # this could be imu angular vel if use_imu or angular vel from state est
+            base_linear, # zeros with base_state_source "imu", linear vel from the concurrent SE or the ground truth otherwise
+            base_ang_vel, # imu angular vel if base_state_source is not "ground_truth"
             base_projected_gravity,
             ref_base_lin_vel_h[0:2],
             [ref_base_ang_vel[2]],
@@ -260,13 +290,13 @@ class LocomotionPolicyWrapper:
         
 
         # Action Filtering
+        # The raw action is the last action in the observation, as in training
+        self.past_rl_actions = rl_action_temp.copy()
         if(self.use_filter_actions):
-            alpha = 0.8
-            past_rl_actions_temp = self.past_rl_actions.copy()
-            self.past_rl_actions = rl_action_temp.copy()
-            rl_action_temp = alpha * rl_action_temp + (1-alpha) * past_rl_actions_temp
-        else:
-            self.past_rl_actions = rl_action_temp.copy()
+            # Exponential moving average (low-pass on the filter output), as in training
+            alpha = self.action_filter_alpha
+            self.filtered_rl_actions = alpha * rl_action_temp + (1-alpha) * self.filtered_rl_actions
+            rl_action_temp = self.filtered_rl_actions.copy()
 
         # Use this print to understand the order of joints in the locomotion policy
         # first HIP, then THIGH, then CALF for each leg

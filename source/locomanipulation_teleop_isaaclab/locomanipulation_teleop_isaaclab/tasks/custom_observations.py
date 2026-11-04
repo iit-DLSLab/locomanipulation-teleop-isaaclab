@@ -21,7 +21,7 @@ def _get_concurrent_state_estimation(self):
         [
             tensor
             for tensor in (
-                self._imu.data.lin_acc_b,
+                #self._imu.data.lin_acc_b,  # the IMU linear acceleration is not used, too noisy
                 self._imu.data.ang_vel_b,
                 self._pva.data.projected_gravity_b,
                 self._velocity_commands,
@@ -78,7 +78,7 @@ def _get_rma(self):
         [
             tensor
             for tensor in (
-                self._imu.data.lin_acc_b,
+                #self._imu.data.lin_acc_b,  # the IMU linear acceleration is not used, too noisy
                 self._imu.data.ang_vel_b,
                 self._pva.data.projected_gravity_b,
                 self._velocity_commands,

@@ -11,11 +11,13 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/DlsHeader.msg"
   "msg/Pose.msg"
   "msg/Screw.msg"
   "msg/BlindState.msg"
   "msg/BaseState.msg"
   "msg/Imu.msg"
+  "msg/ControlSignal.msg"
   "msg/TrajectoryGenerator.msg"
   "msg/ArmState.msg"
   "msg/ArmTrajectoryGenerator.msg"

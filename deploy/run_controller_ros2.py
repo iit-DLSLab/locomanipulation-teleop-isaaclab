@@ -48,7 +48,7 @@ if os.environ.get("LOCOMANIPULATION_TELEOP_ROS2_SOURCED") != "1":
 import rclpy 
 from rclpy.node import Node 
 from sensor_msgs.msg import Joy
-from dls2_interface.msg import BaseState, BlindState, TrajectoryGenerator, ArmState, ArmTrajectoryGenerator, ArmControlSignal
+from dls2_interface.msg import BaseState, BlindState, Imu, ControlSignal, ArmState, ArmTrajectoryGenerator, ArmControlSignal
 from geometry_msgs.msg import PoseArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
@@ -99,7 +99,7 @@ class LocoManipulationTeleopControlNode(Node):
         # Load the model and data.
         self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_rough.xml")
         self.mjData = mujoco.MjData(self.mjModel)
-        keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "home")
+        keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "down")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]
         
         self.use_ik_visualizer = True
@@ -130,14 +130,24 @@ class LocoManipulationTeleopControlNode(Node):
         self.arm_joints_velocity = np.zeros(6)  # 6 arm joints
         self.gripper_joint_position = 0
         self.gripper_joint_velocity = 0
-        self.legs_joints_position = np.zeros(12)  # 12 leg joints
         self.legs_joints_velocity = np.zeros(12)  # 12 leg joints 
         self.desired_joint_pos_arm = np.zeros(6)
         self.desired_joint_pos_gripper = 0
-        self.desired_joint_pos_leg = self.mjData.qpos[7:19]
+        goDown_qpos = self.mjModel.key_qpos[keyframe_id]
+        self.desired_joint_pos_leg = goDown_qpos[7:19].copy()
+        self.legs_joints_position = goDown_qpos[7:19].copy()
+
+        # Startup ramp: interpolate from the measured joints to the "down" keyframe,
+        # otherwise the first command jumps there with the stand up gains
+        self.startup_ramp_duration = 3.0
+        self.startup_ramp_start_time = None
+        self.startup_ramp_initial_joint_pos = None
+        self.startup_ramp_final_joint_pos = goDown_qpos[7:19].copy()
+        self.startup_ramp_last_joint_pos = self.desired_joint_pos_leg.copy()
+        self.startup_ramp_done = False
         self.desired_pose_command = np.zeros(2)
         self.Kp_legs = config.Kp_stand_up_and_down
-        self.Kd_legs = config.Kp_stand_up_and_down
+        self.Kd_legs = config.Kd_stand_up_and_down
         self.Kp_arm = config.Kp_arm
         self.Kd_arm = config.Kd_arm
         self.Kp_gripper = config.Kp_gripper
@@ -167,10 +177,12 @@ class LocoManipulationTeleopControlNode(Node):
         # Subscribers and Publishers
         self.subscription_base_state = self.create_subscription(BaseState,"/base_state", self.get_base_state_callback, 1)
         self.subscription_blind_state = self.create_subscription(BlindState,"/blind_state", self.get_blind_state_callback, 1)
+        self.subscription_imu = self.create_subscription(Imu,"/imu", self.get_imu_callback, 1)
         self.subscription_arm_blind_state = self.create_subscription(ArmState,"/arm_state", self.get_arm_blind_state_callback, 1)
         self.subscription_joy = self.create_subscription(Joy,"/joy", self.joystick.get_joy_callback, 1)
         
-        self.publisher_trajectory_generator = self.create_publisher(TrajectoryGenerator,"/trajectory_generator", 1)
+        self.publisher_control_signal = self.create_publisher(ControlSignal,"/control_signal_legged", 1)
+        self.sequence_id = 0 # To keep track of the last msg sent, useful for debugging and synchronization
         self.publisher_arm_trajectory_generator = self.create_publisher(ArmTrajectoryGenerator,"/arm_trajectory_generator", 1)
         self.publisher_arm_control_signal = self.create_publisher(ArmControlSignal,"/arm_control_signal", 1)
         
@@ -180,6 +192,7 @@ class LocoManipulationTeleopControlNode(Node):
 
         # Safety check to not do anything until a first base and blind state are received
         self.first_message_base_arrived = False
+        self.first_message_imu_arrived = False
         self.first_message_legs_joints_arrived = False
         self.first_message_arm_joints_arrived = True
         self.last_joy_time = None
@@ -190,6 +203,11 @@ class LocoManipulationTeleopControlNode(Node):
         self.linear_velocity = np.zeros(3)
         self.angular_velocity = np.zeros(3)
 
+        # IMU
+        self.imu_linear_acceleration = np.zeros(3)
+        self.imu_angular_velocity = np.zeros(3)
+        self.imu_orientation = np.zeros(4)
+
 
     def get_base_state_callback(self, msg):
         self.position = np.array(msg.pose.position) #world frame
@@ -198,6 +216,14 @@ class LocoManipulationTeleopControlNode(Node):
         self.linear_velocity = np.array(msg.velocity.linear) #world frame
         self.angular_velocity = np.array(msg.velocity.angular) #base frame
         self.first_message_base_arrived = True
+
+
+    def get_imu_callback(self, msg):
+        self.imu_linear_acceleration = np.array(msg.linear_acceleration) 
+        self.imu_angular_velocity = np.array(msg.angular_velocity) 
+        # For the quaternion, the order is [w, x, y, z] on mujoco, and [x, y, z, w] on DLS2
+        self.imu_orientation = np.roll(np.array(msg.orientation), 1) 
+        self.first_message_imu_arrived = True
 
 
     def get_blind_state_callback(self, msg):
@@ -214,8 +240,12 @@ class LocoManipulationTeleopControlNode(Node):
 
     def compute_rl_control(self):        
         # Safety check to not do anything until a first base and blind state are received
-        if(self.first_message_base_arrived==False or self.first_message_legs_joints_arrived==False or self.first_message_arm_joints_arrived==False):
-            return
+        if(config.training_env["base_state_source"] != "ground_truth"):
+            if(self.first_message_imu_arrived==False or self.first_message_legs_joints_arrived==False or self.first_message_arm_joints_arrived==False):
+                return
+        else:
+            if(self.first_message_base_arrived==False or self.first_message_legs_joints_arrived==False or self.first_message_arm_joints_arrived==False):
+                return
         
         # Safety check for joystick timeout
         if(self.last_joy_time is not None and time.time() - self.last_joy_time > 1.0):
@@ -230,8 +260,12 @@ class LocoManipulationTeleopControlNode(Node):
         self.mjData.qpos[0:3] = copy.deepcopy(self.position)
         self.mjData.qvel[0:3] = copy.deepcopy(self.linear_velocity)
 
-        self.mjData.qpos[3:7] = copy.deepcopy(self.orientation)
-        self.mjData.qvel[3:6] = copy.deepcopy(self.angular_velocity)
+        if(config.training_env["base_state_source"] != "ground_truth"):
+            self.mjData.qpos[3:7] = copy.deepcopy(self.imu_orientation)
+            self.mjData.qvel[3:6] = copy.deepcopy(self.imu_angular_velocity)
+        else:
+            self.mjData.qpos[3:7] = copy.deepcopy(self.orientation)
+            self.mjData.qvel[3:6] = copy.deepcopy(self.angular_velocity)
         
         self.mjData.qpos[7:19] = copy.deepcopy(self.legs_joints_position)
         self.mjData.qvel[6:18] = copy.deepcopy(self.legs_joints_velocity)
@@ -292,12 +326,31 @@ class LocoManipulationTeleopControlNode(Node):
                         ref_base_lin_vel=ref_base_lin_vel, 
                         ref_base_ang_vel=ref_base_ang_vel,
                         ref_pose_command=self.desired_pose_command,
+                        imu_linear_acceleration=self.imu_linear_acceleration,
+                        imu_angular_velocity=self.imu_angular_velocity,
+                        imu_orientation=self.imu_orientation,
                         heightmap_data=self.heightmap.data if self.locomotion_policy.use_vision else None)
 
             self.Kp_legs = self.locomotion_policy.Kp_walking
             self.Kd_legs = self.locomotion_policy.Kd_walking
         
         else:
+            # Startup ramp, starting from the first measured joints. If goUp/goDown changed the
+            # reference in the meantime, they have their own ramp and this one stops
+            if not self.startup_ramp_done:
+                if not np.array_equal(self.desired_joint_pos_leg, self.startup_ramp_last_joint_pos):
+                    self.startup_ramp_done = True
+                else:
+                    if self.startup_ramp_start_time is None:
+                        self.startup_ramp_start_time = time.time()
+                        self.startup_ramp_initial_joint_pos = joints_pos_leg.copy()
+                    alpha = min((time.time() - self.startup_ramp_start_time) / self.startup_ramp_duration, 1.0)
+                    self.desired_joint_pos_leg = (
+                        (1 - alpha) * self.startup_ramp_initial_joint_pos + alpha * self.startup_ramp_final_joint_pos
+                    )
+                    if alpha >= 1.0:
+                        self.startup_ramp_done = True
+
             # Go up-and-down
             self.Kp_legs = self.locomotion_policy.Kp_stand_up_and_down
             self.Kd_legs = self.locomotion_policy.Kd_stand_up_and_down
@@ -314,20 +367,31 @@ class LocoManipulationTeleopControlNode(Node):
             joints_pos_leg + lower,
             joints_pos_leg + upper
         )
+        # The startup ramp detects a goUp/goDown from a change of the reference: store it after the clipping
+        if not self.startup_ramp_done:
+            self.startup_ramp_last_joint_pos = self.desired_joint_pos_leg.copy()
         
 
 
-        # Send the desired positions to the trajectory generator --------------------------------            
-        trajectory_generator_msg = TrajectoryGenerator()
-        trajectory_generator_msg.timestamp = float(self.get_clock().now().nanoseconds)
-        trajectory_generator_msg.joints_position = self.desired_joint_pos_leg.tolist()
-        trajectory_generator_msg.joints_velocity = np.zeros(12).tolist()
-        trajectory_generator_msg.kp = (np.ones(12)*self.Kp_legs).tolist()
-        trajectory_generator_msg.kd = (np.ones(12)*self.Kd_legs).tolist()
-        self.publisher_trajectory_generator.publish(trajectory_generator_msg)
+        # Send the desired positions of the legs -------------------------------------------------
+        timestamp = int(self.get_clock().now().nanoseconds)
+        sequence_id = int(self.sequence_id % 1000)  # To avoid overflow, we reset the sequence id after it reaches a certain value
+        self.sequence_id += 1
+
+        control_signal_msg = ControlSignal()
+        control_signal_msg.header.timestamp = timestamp
+        control_signal_msg.header.sequence_id = sequence_id
+        control_signal_msg.control_mode = 1
+        control_signal_msg.joints_position = self.desired_joint_pos_leg.tolist()
+        control_signal_msg.joints_velocity = np.zeros(12).tolist()
+        control_signal_msg.joints_torques = np.zeros(12).tolist()
+        control_signal_msg.kp = (np.ones(12)*self.Kp_legs).tolist()
+        control_signal_msg.kd = (np.ones(12)*self.Kd_legs).tolist()
+        self.publisher_control_signal.publish(control_signal_msg)
 
         arm_trajectory_generator_msg = ArmTrajectoryGenerator()
-        arm_trajectory_generator_msg.timestamp = float(self.get_clock().now().nanoseconds)
+        arm_trajectory_generator_msg.header.timestamp = timestamp
+        arm_trajectory_generator_msg.header.sequence_id = sequence_id
         arm_trajectory_generator_msg.desired_arm_joints_position = self.desired_joint_pos_arm.tolist()
         arm_trajectory_generator_msg.desired_arm_joints_velocity = (self.desired_joint_pos_arm*0.0).tolist()
         arm_trajectory_generator_msg.arm_kp = (np.ones(6)*self.Kp_arm).tolist()
@@ -354,7 +418,7 @@ class LocoManipulationTeleopControlNode(Node):
                 """final_base_pose, \
                     final_arm_joints, \
                         ik_succeded = self.ik_mink_solver.compute(target_pos, target_quat, self.arm_joints_position,
-                        self.desired_pose_command_overwrite, optimize_height= True, optimize_pitch= True, visualize=False)"""
+                        self.desired_pose_command, optimize_height= True, optimize_pitch= True, visualize=False)"""
 
                 visualizer_base_pose = np.array([base_ori_euler_xyz[1], base_pos[2]])
 
