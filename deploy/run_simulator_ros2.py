@@ -48,7 +48,7 @@ if os.environ.get("LOCOMANIPULATION_TELEOP_ROS2_SOURCED") != "1":
 # Giulio Turrisi
 import rclpy 
 from rclpy.node import Node 
-from dls2_interface.msg import BaseState, BlindState, TrajectoryGenerator, ArmState, ArmTrajectoryGenerator, ArmControlSignal
+from dls2_interface.msg import BaseState, BlindState, Imu, ControlSignal, ArmState, ArmTrajectoryGenerator, ArmControlSignal
 from geometry_msgs.msg import PoseArray, Pose
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
@@ -65,6 +65,8 @@ import mujoco.viewer
 import mujoco_utils
 from heightmap import HeightMap
 
+import config
+
 
 class MujocoSimulationNode(Node):
     def __init__(self):
@@ -73,7 +75,7 @@ class MujocoSimulationNode(Node):
         self.simulation_dt = 0.002
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(dir_path+"/../robot_model/scene_flat.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(config.robot_model_path)
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "down")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]
@@ -90,9 +92,10 @@ class MujocoSimulationNode(Node):
         # Subscribers and Publishers
         self.publisher_base_state = self.create_publisher(BaseState,"/base_state", 1)
         self.publisher_blind_state = self.create_publisher(BlindState,"/blind_state", 1)
+        self.publisher_imu = self.create_publisher(Imu,"/imu", 1)
         self.publisher_arm_blind_state = self.create_publisher(ArmState,"/arm_state", 1)
         self.subscriber_trajectory_generator_arm = self.create_subscription(ArmTrajectoryGenerator,"/arm_trajectory_generator", self.get_arm_trajectory_generator_callback, 1)
-        self.subscriber_trajectory_generator_legs = self.create_subscription(TrajectoryGenerator,"/trajectory_generator", self.get_legs_trajectory_generator_callback, 1)
+        self.subscriber_control_signal_legs = self.create_subscription(ControlSignal,"/control_signal_legged", self.get_legs_control_signal_callback, 1)
 
         self.timer = self.create_timer(self.simulation_dt, self.compute_simulator_step_callback)
 
@@ -117,7 +120,7 @@ class MujocoSimulationNode(Node):
         self.Kd_arm = np.array(msg.arm_kd)[0]
 
 
-    def get_legs_trajectory_generator_callback(self, msg):
+    def get_legs_control_signal_callback(self, msg):
         
         # Desired leg joints position
         joints_position = np.array(msg.joints_position)
@@ -175,6 +178,13 @@ class MujocoSimulationNode(Node):
         blind_state_msg.joints_position = copy.deepcopy(self.mjData.qpos[7:19]).tolist()
         blind_state_msg.joints_velocity = copy.deepcopy(self.mjData.qvel[6:18]).tolist()
         self.publisher_blind_state.publish(blind_state_msg)
+
+        imu_msg = Imu()
+        imu_msg.linear_acceleration = self.mjData.sensordata[0:3]
+        imu_msg.angular_velocity = self.mjData.sensordata[3:6]
+        # For the quaternion, the order is [w, x, y, z] on mujoco, and [x, y, z, w] on DLS2
+        imu_msg.orientation = np.roll(np.array(self.mjData.sensordata[9:13]), -1)
+        self.publisher_imu.publish(imu_msg)
 
         arm_blind_state_msg = ArmState()
         arm_blind_state_msg.joints_position = self.mjData.qpos[19:25].tolist()

@@ -13,7 +13,7 @@ from pxr import Usd, UsdPhysics
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
@@ -24,18 +24,64 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import NoiseModel
 
-from isaaclab import cloner
+from isaaclab.sim.spawners.from_files.from_files import spawn_from_usd_file
 
-from locomanipulation_teleop_isaaclab.tasks import custom_observations, custom_rewards, custom_events
+from locomanipulation_teleop_isaaclab.tasks import custom_observations, custom_rewards, custom_events, custom_visualizations
 from locomanipulation_teleop_isaaclab.tasks.supervised_learning_networks import FrozenRandomMlpEncoder, create_supervised_network
-from .locomanipulation_env_cfg import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
+from .go2_piper_env_cfg import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
+from .a2_piper_env_cfg import A2FlatEnvCfg, A2RoughVisionEnvCfg, A2RoughBlindEnvCfg
+
+ARM_BODY_NAMES = tuple(f"link{i}" for i in range(1, 9))
+"""The rigid bodies of the Piper arm."""
+
+
+@sim_utils.clone
+def spawn_robot_without_arm_collisions(
+    prim_path: str,
+    cfg: sim_utils.UsdFileCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+) -> Usd.Prim:
+    """Spawn the robot USD and disable the Piper colliders, before the prototype is copied to every env.
+
+    The arm must not touch the terrain nor the quadruped. With Isaac Lab 3, a physics:filteredPairs relationship
+    towards the terrain crashes PhysX on mesh terrains and is dropped by Newton (each env is built from the env_0
+    robot subtree only), so the arm colliders are disabled instead. This also removes arm self-collisions, the only
+    contacts the arm had left in this scene.
+
+    The function is decorated with :func:`isaaclab.sim.clone`, which spawns the prototype at the first matching env
+    and then copies it to the other envs: disabling the colliders here, on the prototype, propagates them to all
+    the envs (the InteractiveScene of Isaac Lab 3 constructs and replicates the assets before ``_setup_scene``).
+    """
+    prim = spawn_from_usd_file(prim_path, cfg.usd_path, cfg, translation, orientation)
+
+    # bodies may be nested (e.g. Robot/Geometry/base/link1/...), so look them up by name
+    rigid_bodies = {
+        child.GetName(): child for child in Usd.PrimRange(prim) if child.HasAPI(UsdPhysics.RigidBodyAPI)
+    }
+    for body_name in ARM_BODY_NAMES:
+        if body_name not in rigid_bodies:
+            raise RuntimeError(
+                f"Cannot disable arm collisions: rigid body '{body_name}' not found under '{prim.GetPath()}'."
+            )
+        for child in Usd.PrimRange(rigid_bodies[body_name]):
+            if child.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Set(False)
+    return prim
+
 
 class LocomotionManipulationEnv(DirectRLEnv):
 
-    _ARM_BODY_NAMES = tuple(f"link{i}" for i in range(1, 9))
+    _ARM_BODY_NAMES = ARM_BODY_NAMES
 
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
         self._edge_map_visualizer = None
+        self._feet_edge_swing_visualizer = None
+        self._height_map_visualizer = None
+        # Isaac Lab 3.0: the InteractiveScene owns the construction and the cloning of the assets and sensors,
+        # so they must be declared on cfg.scene before the scene is created
+        self._populate_scene_cfg(cfg)
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -44,6 +90,12 @@ class LocomotionManipulationEnv(DirectRLEnv):
             self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
         )
         self._previous_previous_actions = torch.zeros(
+            self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
+        )
+        # Vertical feet velocity at the previous step, used to penalize the touchdown velocity
+        self._last_feet_vz = torch.zeros(self.num_envs, 4, device=self.device)
+        # Output of the exponential moving average action filter
+        self._filtered_actions = torch.zeros(
             self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
         )
 
@@ -104,7 +156,7 @@ class LocomotionManipulationEnv(DirectRLEnv):
             self._observation_history_rma = torch.zeros(self.num_envs, cfg.rma_history_length, cfg.single_rma_observation_space, device=self.device)
 
         # Learned State Estimator
-        if(cfg.use_concurrent_state_est == True):
+        if(cfg.base_state_source == "concurrent_se"):
             self._concurrent_state_est_network = create_supervised_network(
                 cfg.concurrent_state_est_observation_space,
                 cfg.concurrent_state_est_output_space,
@@ -119,8 +171,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
         if self.cfg.observation_noise_model:
             num_leg_joints = cfg.action_space
             num_arm_joints = len(cfg.desired_joints_order) - num_leg_joints
+            # The policy sees the IMU acceleration only with base_state_source "imu", otherwise a velocity (ground truth or
+            # concurrent SE prediction). The RMA and concurrent SE inputs do not use the IMU linear acceleration
+            base_linear_term = "base_linear_acc" if cfg.base_state_source == "imu" else "base_linear_vel"
             proprio_terms_before_clock = [
-                ("base_linear", 3),
+                (base_linear_term, 3),
                 ("base_ang_vel", 3),
                 ("projected_gravity", 3),
                 ("velocity_commands", 3),
@@ -133,7 +188,7 @@ class LocomotionManipulationEnv(DirectRLEnv):
             proprio_terms = proprio_terms_before_clock + proprio_terms_after_clock
             policy_terms = (
                 proprio_terms_before_clock
-                + [("clock", 4 if cfg.use_clock_signal else 0)]
+                + [("clock", 8 if cfg.use_clock_signal else 0)]
                 + proprio_terms_after_clock
             ) * cfg.history_length
             # the height map takes whatever is left of the observation space
@@ -142,13 +197,18 @@ class LocomotionManipulationEnv(DirectRLEnv):
             policy_terms += [("height_map", height_map_size), ("rma", rma_size)]
 
             self._observation_noise_model = self._make_observation_noise_model(policy_terms)
+            # Global height map offset, the same for all the cells: a bias sampled at reset plus a noise
+            # sampled at every time-step, both shared by the whole height map of an env
+            self._height_map_global_bias = torch.zeros(self.num_envs, 1, device=self.device)
             if cfg.use_rma:
+                # the RMA does not use the IMU linear acceleration
                 self._observation_noise_model_rma = self._make_observation_noise_model(
-                    proprio_terms * cfg.rma_history_length
+                    proprio_terms[1:] * cfg.rma_history_length
                 )
-            if cfg.use_concurrent_state_est:
+            if cfg.base_state_source == "concurrent_se":
+                # the concurrent SE does not use the IMU linear acceleration
                 self._observation_noise_model_concurrent_state_est = self._make_observation_noise_model(
-                    proprio_terms * cfg.concurrent_state_est_history_length
+                    proprio_terms[1:] * cfg.concurrent_state_est_history_length
                 )
 
         # Logging
@@ -180,9 +240,13 @@ class LocomotionManipulationEnv(DirectRLEnv):
                 "feet_height_clearance_aperiodic",
                 "feet_height_clearance_mujoco_periodic",
                 "feet_height_clearance_mujoco_aperiodic",
+                "feet_swing_trajectory_periodic",
+                "feet_swing_trajectory_aperiodic",
                 "feet_slide",
+                "feet_landing_vel_l2",
                 "feet_to_hip_distance_l2",
-                "feet_edge",
+                "feet_edge_stance",
+                "feet_edge_swing",
                 "feet_vertical_surface_contacts",
 
                 "periodic_contact_suggestion",
@@ -224,114 +288,79 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._nominal_static_friction = self._robot.data.joint_friction_coeff.torch.clone()
         self._nominal_viscous_friction = self._robot.data.joint_viscous_friction_coeff.torch.clone()
 
-        if getattr(self.cfg, "visualize_edge_map", False):
+        if (
+            getattr(self.cfg, "visualize_edge_map", False)
+            or getattr(self.cfg, "visualize_feet_edge_swing_zone", False)
+            or getattr(self.cfg, "visualize_height_map_with_noise", False)
+        ):
             self.set_debug_vis(True)
 
-    def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robot)
-        self.scene.articulations["robot"] = self._robot
-        self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
-        self.scene.sensors["contact_sensor"] = self._contact_sensor
+    @staticmethod
+    def _populate_scene_cfg(cfg):
+        """Declare the robot, the sensors, the terrain and the light on cfg.scene.
 
+        In Isaac Lab 3.0 the InteractiveScene builds the clone plan from the declared entities, constructs them and
+        replicates env_0 (including the PhysX collision filtering with the terrain). The entities keep the names used
+        so far, and the env cfg fields (cfg.robot, cfg.terrain, ...) are left in place, so the rest of the code and the
+        hydra overrides are unchanged.
+        """
+        scene = cfg.scene
+        # the robot is spawned with the Piper colliders disabled, see spawn_robot_without_arm_collisions
+        scene.robot = cfg.robot.replace(spawn=cfg.robot.spawn.replace(func=spawn_robot_without_arm_collisions))
+        scene.contact_sensor = cfg.contact_sensor
         # Keep the base-centered scanner for base-height and terrain-orientation terms.
-        self._pose_height_scanner = RayCaster(self.cfg.pose_height_scanner)
-        self.scene.sensors["pose_height_scanner"] = self._pose_height_scanner
+        scene.pose_height_scanner = cfg.pose_height_scanner
 
         # Use one small height map centered on each foot for the clearance rewards.
-        self._foot_height_scanners = []
         for foot_name in ("FL_foot", "FR_foot", "RL_foot", "RR_foot"):
             # Preserve the configured hierarchy, replacing the leg prefix in each link.
             leg_prefix = foot_name.split("_", 1)[0]
-            scanner_cfg = self.cfg.foot_height_scanner.replace(
-                prim_path=self.cfg.foot_height_scanner.prim_path.replace("FL_", f"{leg_prefix}_"),
-                visualizer_cfg=self.cfg.foot_height_scanner.visualizer_cfg.replace(
+            scanner_cfg = cfg.foot_height_scanner.replace(
+                prim_path=cfg.foot_height_scanner.prim_path.replace("FL_", f"{leg_prefix}_"),
+                visualizer_cfg=cfg.foot_height_scanner.visualizer_cfg.replace(
                     prim_path=f"/Visuals/{foot_name}HeightScanner"
                 ),
             )
-            scanner = RayCaster(scanner_cfg)
-            self.scene.sensors[f"{foot_name.lower()}_height_scanner"] = scanner
-            self._foot_height_scanners.append(scanner)
+            setattr(scene, f"{foot_name.lower()}_height_scanner", scanner_cfg)
 
-        # Add the perceptive and edge scanners only for vision-based locomotion.
-        if(getattr(self.cfg, "use_vision", False)):
-            self._perceptive_height_scanner = RayCaster(self.cfg.perceptive_height_scanner)
-            self.scene.sensors["perceptive_height_scanner"] = self._perceptive_height_scanner
-
-            self._edge_height_scanner = RayCaster(self.cfg.edge_height_scanner)
-            self.scene.sensors["edge_height_scanner"] = self._edge_height_scanner
+        # Add the perceptive scanner only for vision-based locomotion.
+        if getattr(cfg, "perceptive_height_scanner", None) is not None:
+            scene.perceptive_height_scanner = cfg.perceptive_height_scanner
+        # The edge scanner is only used by the feet edge rewards (never observed), so it is available for blind locomotion as well
+        if getattr(cfg, "edge_height_scanner", None) is not None:
+            scene.edge_height_scanner = cfg.edge_height_scanner
 
         # we add an imu
-        self._imu = Imu(self.cfg.imu)
-        self.scene.sensors["imu"] = self._imu
-
+        scene.imu = cfg.imu
         # Report ideal projected gravity in the same frame as the IMU measurements.
-        self._pva = Pva(PvaCfg(
-            prim_path=self.cfg.imu.prim_path,
-            update_period=self.cfg.imu.update_period,
-            offset=PvaCfg.OffsetCfg(
-                pos=self.cfg.imu.offset.pos,
-                rot=self.cfg.imu.offset.rot,
-            ),
-        ))
-        self.scene.sensors["pva"] = self._pva
-
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
-        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-
-        # Disable arm contacts on the source environment before it is cloned.
-        self._disable_arm_terrain_and_quadruped_collisions()
-        
-        # clone and replicate environments
-        src, dest = "/World/envs/env_0", "/World/envs/env_{}"
-        positions = cloner.grid_transforms(
-            self.scene.num_envs, self.scene.cfg.env_spacing, device=self.device
-        )[0]
-        global_paths = (self.cfg.terrain.prim_path,)
-        plan = cloner.clone_plan_from_env_0(
-            src, dest, self.scene.num_envs, self.device, positions, global_paths=global_paths
+        scene.pva = PvaCfg(
+            prim_path=cfg.imu.prim_path,
+            update_period=cfg.imu.update_period,
+            offset=PvaCfg.OffsetCfg(pos=cfg.imu.offset.pos, rot=cfg.imu.offset.rot),
         )
-        cloner.replicate(plan, stage=self.scene.stage)
 
-        # PhysX replication requires explicit collision filtering between environments.
-        if "physx" in self.scene.physics_backend:
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
-        
+        # the scene sets num_envs and env_spacing of the terrain
+        scene.terrain = cfg.terrain
         # add lights
-        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
-        light_cfg.func("/World/Light", light_cfg)
+        scene.light = AssetBaseCfg(
+            prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        )
 
-    def _disable_arm_terrain_and_quadruped_collisions(self):
-        """Disable Piper collisions with the terrain and the rest of the robot."""
-        robot_prim_name = self.cfg.robot.prim_path.rsplit("/", maxsplit=1)[-1]
-        source_robot_path = f"{self.scene.env_prim_paths[0]}/{robot_prim_name}"
-        source_robot_prim = self.scene.stage.GetPrimAtPath(source_robot_path)
-        if not source_robot_prim.IsValid():
-            raise RuntimeError(f"Cannot disable arm collisions: invalid robot prim '{source_robot_path}'.")
-
-        # bodies may be nested (e.g. Robot/Geometry/base/link1/...), so look them up by name
-        rigid_bodies = {
-            prim.GetName(): prim
-            for prim in Usd.PrimRange(source_robot_prim)
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI)
-        }
-        arm_body_prims = []
-        for body_name in self._ARM_BODY_NAMES:
-            if body_name not in rigid_bodies:
-                raise RuntimeError(
-                    f"Cannot disable arm collisions: rigid body '{body_name}' not found under '{source_robot_path}'."
-                )
-            arm_body_prims.append(rigid_bodies[body_name])
-
-        # The arm must not touch the terrain nor the quadruped. With Isaac Lab 3, a
-        # physics:filteredPairs relationship towards the terrain crashes PhysX on mesh
-        # terrains and is dropped by Newton (each env is built from the env_0 robot
-        # subtree only), so the arm colliders are disabled instead. This also removes
-        # arm self-collisions, the only contacts the arm had left in this scene.
-        for body_prim in arm_body_prims:
-            for prim in Usd.PrimRange(body_prim):
-                if prim.HasAPI(UsdPhysics.CollisionAPI):
-                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
+    def _setup_scene(self):
+        # The entities are constructed and cloned by the InteractiveScene, see _populate_scene_cfg
+        self._robot = self.scene["robot"]
+        self._contact_sensor = self.scene["contact_sensor"]
+        self._pose_height_scanner = self.scene["pose_height_scanner"]
+        self._foot_height_scanners = [
+            self.scene[f"{foot_name.lower()}_height_scanner"] for foot_name in ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
+        ]
+        if getattr(self.cfg, "perceptive_height_scanner", None) is not None:
+            self._perceptive_height_scanner = self.scene["perceptive_height_scanner"]
+        if getattr(self.cfg, "edge_height_scanner", None) is not None:
+            self._edge_height_scanner = self.scene["edge_height_scanner"]
+        self._imu = self.scene["imu"]
+        self._pva = self.scene["pva"]
+        self._terrain = self.scene.terrain
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_previous_actions = self._previous_actions.clone()
@@ -341,12 +370,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
         # Clip the action
         self._actions = torch.clamp(self._actions, -self.cfg.desired_clip_actions, self.cfg.desired_clip_actions)
 
-        # Filter the action
+        # Filter the action with an exponential moving average (low-pass on the filter output, not on the raw actions)
         if(self.cfg.use_filter_actions):
-            alpha = 0.8
-            temp = alpha * self._actions + (1 - alpha) * self._previous_actions
-            #self._processed_actions = self.cfg.action_scale * temp + self._robot.data.default_joint_pos[:,0:12]
-            self._processed_actions = self.cfg.action_scale * temp + self._robot.data.default_joint_pos[:,self._ids_joints_order[0:12]]
+            alpha = self.cfg.action_filter_alpha
+            self._filtered_actions = alpha * self._actions + (1 - alpha) * self._filtered_actions
+            self._processed_actions = self.cfg.action_scale * self._filtered_actions + self._robot.data.default_joint_pos[:,self._ids_joints_order[0:12]]
         else:
             #self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos[:,0:12]
             self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos[:,self._ids_joints_order[0:12]]
@@ -395,21 +423,24 @@ class LocomotionManipulationEnv(DirectRLEnv):
             # Increment the phase signal by the step frequency and wrap to [0, 1)
             self._phase_signal += self.step_dt * self._step_freq
             self._phase_signal = self._phase_signal % 1.0
-            clock_data = torch.vstack([self._phase_signal[:,0], self._phase_signal[:,1], self._phase_signal[:,2], self._phase_signal[:,3]]).T
-            # all the envs that are not moving, we put -1
+            # While standing the phase is held at the phase offset, as after a reset, so walking always
+            # starts from the same point of the gait cycle instead of a random one (possibly mid swing)
             should_move = torch.norm(self._velocity_commands[:, :3], dim=1) > 0.01
-            clock_data[:, :] = clock_data[:, :]*should_move.unsqueeze(1).expand(-1, 4) + -1.0* ~should_move.unsqueeze(1).expand(-1, 4)
+            self._phase_signal = torch.where(should_move.unsqueeze(1), self._phase_signal, self._phase_offset)
+            # Encode the phase as sin/cos so the signal stays continuous at the 1 -> 0 wrap: [sin FL..RR, cos FL..RR]
+            # While standing this is the clock of the phase offset (all feet in stance, since offsets < duty factor)
+            clock_data = torch.cat([torch.sin(2.0 * torch.pi * self._phase_signal), torch.cos(2.0 * torch.pi * self._phase_signal)], dim=1)
             
 
         # Choosing the main source of observation
-        if(self.cfg.use_concurrent_state_est):
+        if(self.cfg.base_state_source == "concurrent_se"):
             # If concurrent SE/Learned State Estimator, we predict linear and angular vel from IMU
             base_linear = custom_observations._get_concurrent_state_estimation(self)
             base_ang_vel = self._imu.data.ang_vel_b
             projected_gravity_b = self._pva.data.projected_gravity_b
-        elif(self.cfg.use_imu):
+        elif(self.cfg.base_state_source == "imu"):
             # Using directly the IMU
-            base_linear = self._imu.data.lin_acc_b
+            base_linear = self._imu.data.lin_acc_b * 0.0 # we don't use the IMU linear acceleration for now, since it is too noisy and not very useful for locomotion
             base_ang_vel = self._imu.data.ang_vel_b
             projected_gravity_b = self._pva.data.projected_gravity_b
         else:
@@ -448,7 +479,8 @@ class LocomotionManipulationEnv(DirectRLEnv):
         observations = {"proprioceptive": obs}
 
         # Add heightmap data to obs if needed
-        if(getattr(self.cfg, "use_vision", False)):
+        obs_policy = obs
+        if(getattr(self.cfg, "perceptive_height_scanner", None) is not None):
             height_data = (
                 self._perceptive_height_scanner.data.pos_w[:, 2].unsqueeze(1)
                 - self._perceptive_height_scanner.data.ray_hits_w[..., 2]
@@ -456,7 +488,14 @@ class LocomotionManipulationEnv(DirectRLEnv):
             )
             height_data = torch.nan_to_num(height_data, nan=0.0, posinf=1.0, neginf=-1.0)
             height_data = height_data.clip(-1.0, 1.0)
-            obs = torch.cat((obs, height_data), dim=-1)      
+            # The policy also gets the global height map offset, the critic sees the clean height map
+            height_data_policy = height_data
+            if self.cfg.observation_noise_model:
+                global_noise_std = self.cfg.observation_noise_std["height_map_global"][0]
+                height_map_offset = self._height_map_global_bias + global_noise_std * torch.randn_like(self._height_map_global_bias)
+                height_data_policy = height_data + height_map_offset
+            obs_policy = torch.cat((obs, height_data_policy), dim=-1)
+            obs = torch.cat((obs, height_data), dim=-1)
         
 
         # Critic OBS could be different if needed
@@ -471,11 +510,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
         if(self.cfg.use_rma):
             # Predict the RMA observation
             obs_rma = custom_observations._get_rma(self)
-            obs = torch.cat((obs, obs_rma), dim=-1)
+            obs_policy = torch.cat((obs_policy, obs_rma), dim=-1)
 
         # Actor OBS - here after the critic to avoid duplication with rma obs
         # if asymmetric ppo is used
-        observations["policy"] = obs    
+        observations["policy"] = obs_policy
 
         return observations
 
@@ -504,7 +543,11 @@ class LocomotionManipulationEnv(DirectRLEnv):
         feet_air_time_variance = custom_rewards.feet_air_time_variance(self)
 
         feet_slide = custom_rewards.feet_slide(self)
-        feet_edge = custom_rewards.feet_edge(self)
+        feet_landing_vel_l2 = custom_rewards.feet_landing_vel_l2(self)
+        feet_edge_stance = custom_rewards.feet_edge_stance(self)
+        feet_edge_swing = custom_rewards.feet_edge_swing(self)
+        feet_swing_trajectory_periodic = custom_rewards.feet_swing_trajectory_periodic(self)
+        feet_swing_trajectory_aperiodic = custom_rewards.feet_swing_trajectory_aperiodic(self)
         periodic_contact_suggestion = custom_rewards.periodic_contact_suggestion(self)
         stance_contact_suggestion = custom_rewards.stance_contact_suggestion(self)
         feet_height_clearance_mujoco_aperiodic = custom_rewards.feet_height_clearance_mujoco_aperiodic(self)
@@ -541,9 +584,14 @@ class LocomotionManipulationEnv(DirectRLEnv):
             "feet_height_clearance_mujoco_aperiodic": feet_height_clearance_mujoco_aperiodic * self.cfg.feet_height_clearance_mujoco_aperiodic_reward_scale * self.step_dt,
             "feet_height_clearance_mujoco_periodic": feet_height_clearance_mujoco_periodic * self.cfg.feet_height_clearance_mujoco_periodic_reward_scale * self.step_dt,
             
+            "feet_swing_trajectory_periodic": feet_swing_trajectory_periodic * self.cfg.feet_swing_trajectory_periodic_reward_scale * self.step_dt,
+            "feet_swing_trajectory_aperiodic": feet_swing_trajectory_aperiodic * self.cfg.feet_swing_trajectory_aperiodic_reward_scale * self.step_dt,
+
             "feet_slide": feet_slide * self.cfg.feet_slide_reward_scale * self.step_dt,
+            "feet_landing_vel_l2": feet_landing_vel_l2 * self.cfg.feet_landing_vel_reward_scale * self.step_dt,
             "feet_to_hip_distance_l2": feet_to_hip_distance_l2 * self.cfg.feet_to_hip_distance_reward_scale * self.step_dt,
-            "feet_edge": feet_edge * self.cfg.feet_edge_reward_scale * self.step_dt,
+            "feet_edge_stance": feet_edge_stance * self.cfg.feet_edge_stance_reward_scale * self.step_dt,
+            "feet_edge_swing": feet_edge_swing * self.cfg.feet_edge_swing_reward_scale * self.step_dt,
             "feet_vertical_surface_contacts": feet_vertical_surface_contacts * self.cfg.feet_vertical_surface_contacts_reward_scale * self.step_dt,
 
             "periodic_contact_suggestion": periodic_contact_suggestion * self.cfg.periodic_contact_suggestion_reward_scale * self.step_dt,
@@ -568,6 +616,9 @@ class LocomotionManipulationEnv(DirectRLEnv):
         )
         self._lin_vel_l1_error_sum += lin_vel_l1_error * tracks_linear_command
         self._lin_vel_command_l1_sum += lin_vel_command_l1 * tracks_linear_command
+
+        # Stored after the rewards, so that at the next step it holds the velocity before a possible touchdown
+        self._last_feet_vz[:] = self._robot.data.body_lin_vel_w[:, self._feet_ids_robot, 2]
         return reward
 
 
@@ -623,6 +674,8 @@ class LocomotionManipulationEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._previous_previous_actions[env_ids] = 0.0
+        self._last_feet_vz[env_ids] = 0.0
+        self._filtered_actions[env_ids] = 0.0
         
         # Reset commands
         custom_events._get_new_random_commands(self, env_ids)
@@ -638,8 +691,13 @@ class LocomotionManipulationEnv(DirectRLEnv):
         # Reset observation history
         self._observation_history[env_ids] *= 0.0
 
+        # Resample the global height map bias
+        if self.cfg.observation_noise_model:
+            global_bias_std = self.cfg.observation_noise_std["height_map_global"][1]
+            self._height_map_global_bias[env_ids] = global_bias_std * torch.randn(len(env_ids), 1, device=self.device)
+
         # Reset obs and noise concurrent
-        if(self.cfg.use_concurrent_state_est):
+        if(self.cfg.base_state_source == "concurrent_se"):
             self._observation_history_concurrent_state_est[env_ids] *= 0.0
             if self.cfg.observation_noise_model:
                 self._observation_noise_model_concurrent_state_est.reset(env_ids)
@@ -698,8 +756,8 @@ class LocomotionManipulationEnv(DirectRLEnv):
 
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        custom_rewards._set_debug_vis_impl(self, debug_vis)
+        custom_visualizations._set_debug_vis_impl(self, debug_vis)
 
 
     def _debug_vis_callback(self, event):
-        custom_rewards._debug_vis_callback(self, event)
+        custom_visualizations._debug_vis_callback(self, event)

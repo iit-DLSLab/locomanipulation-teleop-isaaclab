@@ -36,7 +36,7 @@ class PlayMujoco:
 
 
         # Load the model and data.
-        self.mjModel = mujoco.MjModel.from_xml_path(file_path + "/../robot_model/scene_rough.xml")
+        self.mjModel = mujoco.MjModel.from_xml_path(config.robot_model_path)
         self.mjData = mujoco.MjData(self.mjModel)
         keyframe_id = mujoco.mj_name2id(self.mjModel, mujoco.mjtObj.mjOBJ_KEY, "home")
         self.mjData.qpos = self.mjModel.key_qpos[keyframe_id]
@@ -81,7 +81,7 @@ class PlayMujoco:
         self.desired_joint_pos_leg = self.mjData.qpos[7:19] 
         self.desired_joint_pos_arm = self.mjData.qpos[19:25] 
         self.desired_joint_pos_gripper = 0.0
-        self.desired_pose_command_overwrite = np.zeros(2)
+        self.desired_pose_command = np.zeros(2)
         self.Kp_legs = 0
         self.Kd_legs = 0
         self.Kp_arm = config.Kp_arm
@@ -128,7 +128,7 @@ class PlayMujoco:
             joints_vel_arm = qvel[18:24]
             joints_vel_gripper = qvel[24]
 
-            if(config.training_env["use_imu"] or config.training_env["use_concurrent_state_est"]):
+            if(config.training_env["base_state_source"] != "ground_truth"):
                 imu_linear_acceleration = self.mjData.sensordata[0:3]
                 imu_angular_velocity = self.mjData.sensordata[3:6]
                 imu_orientation = self.mjData.sensordata[9:13]
@@ -171,7 +171,7 @@ class PlayMujoco:
                             joints_pos_arm=joints_pos_arm,
                             ref_base_lin_vel=ref_base_lin_vel, 
                             ref_base_ang_vel=ref_base_ang_vel,
-                            ref_pose_command=self.desired_pose_command_overwrite,
+                            ref_pose_command=self.desired_pose_command,
                             imu_linear_acceleration=imu_linear_acceleration,
                             imu_angular_velocity=imu_angular_velocity,
                             imu_orientation=imu_orientation,

@@ -1,8 +1,7 @@
-# Header
-string frame_id
-uint32 sequence_id
-float64 timestamp
+# header
+dls2_interface/DlsHeader header
 
+# data
 string robot_name
 
 string[] joints_name
