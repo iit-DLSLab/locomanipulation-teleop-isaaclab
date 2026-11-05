@@ -43,3 +43,5 @@ deploy/ros2_ws/log/
 deploy/ros1_ws/build/
 deploy/ros1_ws/devel/
 deploy/ros1_ws/install/
+# Pixi
+.pixi/

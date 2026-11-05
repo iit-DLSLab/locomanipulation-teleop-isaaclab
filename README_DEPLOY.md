@@ -1,15 +1,17 @@
 
 
-## Installation Deploy using Conda
+## Installation Deploy
 
-1. install [miniforge](https://github.com/conda-forge/miniforge/releases) (x86_64 or arm64 depending on your platform)
+1. Install [pixi](https://pixi.prefix.dev/latest/installation/).
 
-2. create an environment using the file in the folder [deploy/installation](https://github.com/iit-DLSLab/basic-locomotion-dls-isaaclab/tree/main/deploy/installation):
-
+2. Activate the environment from anywhere inside the repo (it uses [pixi.toml](./pixi.toml) in the repo root). The first run creates it:
 
 ```bash
-conda env create -f mamba_environment_ros2.yaml
-conda activate locomanipulation_teleop_isaaclab_ros2_env
+# ROS2 humble
+pixi shell -e humble
+
+# ROS2 lyrical
+pixi shell -e lyrical
 ```
 
 
