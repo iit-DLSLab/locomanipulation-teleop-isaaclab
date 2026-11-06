@@ -48,6 +48,7 @@ if os.environ.get("LOCOMANIPULATION_TELEOP_ROS2_SOURCED") != "1":
 import rclpy 
 from rclpy.node import Node 
 from sensor_msgs.msg import Joy
+from visualization_msgs.msg import Marker, MarkerArray
 from dls2_interface.msg import BaseState, BlindState, Imu, ControlSignal, ArmState, ArmTrajectoryGenerator, ArmControlSignal
 from geometry_msgs.msg import PoseArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -57,6 +58,7 @@ from rclpy.executors import MultiThreadedExecutor
 
 import copy
 import time
+import gc
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -120,11 +122,22 @@ class LocoManipulationTeleopControlNode(Node):
         self.locomotion_policy = LocomotionPolicyWrapper(mjModel=self.mjModel)
         self.ik_mink_solver = IKMink()
 
-        if(self.locomotion_policy.use_vision):
-            resolution_heightmap = config.resolution_heightmap
-            num_rows_heightmap = round(config.size_x_heightmap/resolution_heightmap) + 1
-            num_cols_heightmap = round(config.size_y_heightmap/resolution_heightmap) + 1
-            self.heightmap = HeightMap(num_rows=num_rows_heightmap, num_cols=num_cols_heightmap, dist_x=resolution_heightmap, dist_y=resolution_heightmap, mj_model=mjModel, mj_data=mjData) 
+        # On perceptive policies, use the ROS marker scan in place of MuJoCo ray casting.
+        self.heightmap = None
+        self._last_heightmap_warning_time = 0.0
+        if self.locomotion_policy.use_vision:
+            pattern_cfg = config.training_env["perceptive_height_scanner"]["pattern_cfg"]
+            resolution_heightmap = pattern_cfg["resolution"]
+            num_rows_heightmap = round(pattern_cfg["size"][0] / resolution_heightmap) + 1
+            num_cols_heightmap = round(pattern_cfg["size"][1] / resolution_heightmap) + 1
+            self.heightmap = HeightMap(
+                num_rows=num_rows_heightmap,
+                num_cols=num_cols_heightmap,
+                dist_x=resolution_heightmap,
+                dist_y=resolution_heightmap,
+                mj_model=self.mjModel,
+                mj_data=self.mjData,
+            )
 
         self.arm_joints_position = np.zeros(6)  # 6 arm joints 
         self.arm_joints_velocity = np.zeros(6)  # 6 arm joints
@@ -180,7 +193,9 @@ class LocoManipulationTeleopControlNode(Node):
         self.subscription_imu = self.create_subscription(Imu,"/imu", self.get_imu_callback, 1)
         self.subscription_arm_blind_state = self.create_subscription(ArmState,"/arm_state", self.get_arm_blind_state_callback, 1)
         self.subscription_joy = self.create_subscription(Joy,"/joy", self.joystick.get_joy_callback, 1)
-        
+        if self.locomotion_policy.use_vision:
+            self.subscription_heightmap = self.create_subscription(MarkerArray, "/height_scan_markers", self.get_heightmap_callback, 1,)
+
         self.publisher_control_signal = self.create_publisher(ControlSignal,"/control_signal_legged", 1)
         self.sequence_id = 0 # To keep track of the last msg sent, useful for debugging and synchronization
         self.publisher_arm_trajectory_generator = self.create_publisher(ArmTrajectoryGenerator,"/arm_trajectory_generator", 1)
@@ -195,6 +210,7 @@ class LocoManipulationTeleopControlNode(Node):
         self.first_message_imu_arrived = False
         self.first_message_legs_joints_arrived = False
         self.first_message_arm_joints_arrived = True
+        self.first_message_heightmap_arrived = False
         self.last_joy_time = None
 
         # Base State
@@ -238,6 +254,45 @@ class LocoManipulationTeleopControlNode(Node):
         self.first_message_arm_joints_arrived = True
 
 
+    def get_heightmap_callback(self, msg):
+        """Load a complete ``/height_scan_markers`` scan into ``self.heightmap``."""
+        try:
+            markers = sorted(
+                (
+                    marker
+                    for marker in msg.markers
+                    if marker.action == Marker.ADD and marker.type == Marker.SPHERE
+                ),
+                key=lambda marker: marker.id,
+            )
+            sample_count = self.heightmap.num_rows * self.heightmap.num_cols
+            points = np.array(
+                [
+                    [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z]
+                    for marker in markers
+                ],
+                dtype=np.float64,
+            )
+            if not np.all(np.isfinite(points)):
+                raise ValueError("marker positions must be finite")
+
+            # Publisher order is Y-major/X-minor. HeightMap uses descending X/Y.
+            grid = points.reshape(self.heightmap.num_cols, self.heightmap.num_rows, 3)
+            grid = np.flip(grid.transpose(1, 0, 2), axis=(0, 1))
+            self.heightmap.sensor_data_matrix[:] = grid[:, :, None, :]
+        except ValueError as error:
+            # Keep the last complete scan and throttle malformed-scan warnings.
+            now = time.monotonic()
+            if now - self._last_heightmap_warning_time >= 2.0:
+                self.get_logger().warning(f"Ignoring height-map markers: {error}")
+                self._last_heightmap_warning_time = now
+            return
+
+        if not self.first_message_heightmap_arrived:
+            self.get_logger().info(f"Received the first complete height map ({sample_count} samples)")
+        self.first_message_heightmap_arrived = True
+
+
     def compute_rl_control(self):        
         # Safety check to not do anything until a first base and blind state are received
         if(config.training_env["base_state_source"] != "ground_truth"):
@@ -246,7 +301,12 @@ class LocoManipulationTeleopControlNode(Node):
         else:
             if(self.first_message_base_arrived==False or self.first_message_legs_joints_arrived==False or self.first_message_arm_joints_arrived==False):
                 return
-        
+
+        if self.locomotion_policy.use_vision:
+            # Wait for the first complete height map before running the policy
+            if not self.first_message_heightmap_arrived:
+                return
+
         # Safety check for joystick timeout
         if(self.last_joy_time is not None and time.time() - self.last_joy_time > 1.0):
             self.ref_base_lin_vel_H[0] = 0.0
@@ -294,8 +354,16 @@ class LocoManipulationTeleopControlNode(Node):
         ref_base_lin_vel, ref_base_ang_vel = mujoco_utils.target_base_vel(self.mjData, self.ref_base_lin_vel_H, self.ref_base_ang_yaw_dot, frame='world')
 
 
-        if(self.locomotion_policy.use_vision):
-            self.heightmap.update_height_map(self.mjData.qpos[0:3], yaw=base_ori_euler_xyz[2])
+        # Height map: markers are in the base frame, move them to the world frame
+        heightmap_data = None
+        if self.locomotion_policy.use_vision:
+            rotation = np.empty(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(rotation, base_quat_wxyz)
+            local_points = self.heightmap.sensor_data_matrix.reshape(-1, 3)
+            self.heightmap.data = (
+                local_points @ rotation.reshape(3, 3).T + base_pos
+            ).reshape(self.heightmap.sensor_data_matrix.shape)
+            heightmap_data = self.heightmap.data
 
 
         # IK controller --------------------------------------------------------------
@@ -329,7 +397,7 @@ class LocoManipulationTeleopControlNode(Node):
                         imu_linear_acceleration=self.imu_linear_acceleration,
                         imu_angular_velocity=self.imu_angular_velocity,
                         imu_orientation=self.imu_orientation,
-                        heightmap_data=self.heightmap.data if self.locomotion_policy.use_vision else None)
+                        heightmap_data=heightmap_data)
 
             self.Kp_legs = self.locomotion_policy.Kp_walking
             self.Kd_legs = self.locomotion_policy.Kd_walking
@@ -439,6 +507,19 @@ class LocoManipulationTeleopControlNode(Node):
 
 
 
+def create_executor():
+    # EventsExecutor dispatches the callbacks in C++ (rclpy >= Kilted), with much less overhead than the
+    # default SingleThreadedExecutor. It does not exist on Humble, where we fall back to SingleThreadedExecutor
+    try:
+        from rclpy.experimental import EventsExecutor
+        print("Using EventsExecutor")
+        return EventsExecutor()
+    except ImportError:
+        from rclpy.executors import SingleThreadedExecutor
+        print("EventsExecutor not available in this ROS 2 distro, using SingleThreadedExecutor")
+        return SingleThreadedExecutor()
+
+
 #---------------------------
 if __name__ == '__main__':
     
@@ -446,7 +527,12 @@ if __name__ == '__main__':
     
     rclpy.init()
     locomanipulation_teleop_control_node = LocoManipulationTeleopControlNode()
-    rclpy.spin(locomanipulation_teleop_control_node)
+    # Move everything allocated at startup (modules, model, policy, node) out of the garbage collector:
+    # otherwise its full collections scan all of them and stall the control loop for tens of ms
+    gc.collect()
+    gc.freeze()
+
+    rclpy.spin(locomanipulation_teleop_control_node, create_executor())
     locomanipulation_teleop_control_node.destroy_node()
     rclpy.shutdown()
 

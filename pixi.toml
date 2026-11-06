@@ -31,7 +31,6 @@ wandb = "*"
 [feature.common.pypi-dependencies]
 readchar = "*"
 onnxruntime = "*"
-torch = "*"
 mujoco = "*"
 loop_rate_limiters = "*"
 mink = "*"

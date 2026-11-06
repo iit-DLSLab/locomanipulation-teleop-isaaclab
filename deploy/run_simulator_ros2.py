@@ -47,7 +47,8 @@ if os.environ.get("LOCOMANIPULATION_TELEOP_ROS2_SOURCED") != "1":
 # Authors:
 # Giulio Turrisi
 import rclpy 
-from rclpy.node import Node 
+from rclpy.node import Node
+from visualization_msgs.msg import Marker, MarkerArray
 from dls2_interface.msg import BaseState, BlindState, Imu, ControlSignal, ArmState, ArmTrajectoryGenerator, ArmControlSignal
 from geometry_msgs.msg import PoseArray, Pose
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -87,13 +88,25 @@ class MujocoSimulationNode(Node):
                         #key_callback=lambda x: self._key_callback(x),
                     )
         self.last_render_time = time.time()
-        self.RENDER_FREQ = 30.0  # Hz 
+        self.RENDER_FREQ = 30.0  # Hz
+        self.HEIGHTMAP_FREQ = 15.0  # Hz
+        self.step_num = 0
+
+        # vision policies are the ones trained with the perceptive height scanner
+        self.use_vision = config.training_env.get("perceptive_height_scanner") is not None
+        if(self.use_vision):
+            pattern_cfg = config.training_env["perceptive_height_scanner"]["pattern_cfg"]
+            resolution_heightmap = pattern_cfg["resolution"]
+            num_rows_heightmap = round(pattern_cfg["size"][0]/resolution_heightmap) + 1
+            num_cols_heightmap = round(pattern_cfg["size"][1]/resolution_heightmap) + 1
+            self.heightmap = HeightMap(num_rows=num_rows_heightmap, num_cols=num_cols_heightmap, dist_x=resolution_heightmap, dist_y=resolution_heightmap, mj_model=self.mjModel, mj_data=self.mjData)
 
         # Subscribers and Publishers
         self.publisher_base_state = self.create_publisher(BaseState,"/base_state", 1)
         self.publisher_blind_state = self.create_publisher(BlindState,"/blind_state", 1)
         self.publisher_imu = self.create_publisher(Imu,"/imu", 1)
         self.publisher_arm_blind_state = self.create_publisher(ArmState,"/arm_state", 1)
+        self.publisher_heightmap = self.create_publisher(MarkerArray,"/height_scan_markers", 1)
         self.subscriber_trajectory_generator_arm = self.create_subscription(ArmTrajectoryGenerator,"/arm_trajectory_generator", self.get_arm_trajectory_generator_callback, 1)
         self.subscriber_control_signal_legs = self.create_subscription(ControlSignal,"/control_signal_legged", self.get_legs_control_signal_callback, 1)
 
@@ -164,6 +177,47 @@ class MujocoSimulationNode(Node):
         self.mjData.ctrl[12:18] = tau_arm
         self.mjData.ctrl[18] = tau_gripper
         mujoco.mj_step(self.mjModel, self.mjData)
+        self.step_num += 1
+
+
+        # Publish Height Map (same convention as basic-locomotion run_simulator_ros2.py) ----------
+        if self.use_vision and self.step_num % round((1.0/self.simulation_dt)/self.HEIGHTMAP_FREQ) == 0:
+            base_ori_euler_xyz = mujoco_utils.base_ori_euler_xyz(self.mjData)
+            heading_orientation_SO3 = mujoco_utils.heading_orientation_SO3(self.mjData)
+            offset_world_frame = config.training_env["perceptive_height_scanner"]["offset"]["pos"] @ heading_orientation_SO3.T
+            self.heightmap.update_height_map(self.mjData.qpos[0:3] + offset_world_frame, yaw=base_ori_euler_xyz[2])
+
+            # Markers are published in the base frame
+            rotation = np.empty(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(rotation, self.mjData.qpos[3:7])
+            heightmap_local = (
+                (self.heightmap.data.reshape(-1, 3) - self.mjData.qpos[0:3])
+                @ rotation.reshape(3, 3)
+            ).reshape(self.heightmap.num_rows, self.heightmap.num_cols, 3)
+
+            # Inverse of the ordering conversion in run_controller_ros2.get_heightmap_callback.
+            heightmap_publisher_order = np.flip(heightmap_local, axis=(0, 1)).transpose(1, 0, 2).reshape(-1, 3)
+            heightmap_msg = MarkerArray()
+            marker_stamp = self.get_clock().now().to_msg()
+            for marker_id, point in enumerate(heightmap_publisher_order):
+                marker = Marker()
+                marker.header.frame_id = "base_link"
+                marker.header.stamp = marker_stamp
+                marker.ns = "height_scan"
+                marker.id = marker_id
+                marker.type = Marker.SPHERE
+                marker.action = Marker.ADD
+                marker.pose.position.x = point[0]
+                marker.pose.position.y = point[1]
+                marker.pose.position.z = point[2]
+                marker.pose.orientation.w = 1.0
+                marker.scale.x = 0.02
+                marker.scale.y = 0.02
+                marker.scale.z = 0.02
+                marker.color.g = 1.0
+                marker.color.a = 0.5
+                heightmap_msg.markers.append(marker)
+            self.publisher_heightmap.publish(heightmap_msg)
 
 
         # Publish the state of the robot ----------------------------------------------------------
@@ -196,10 +250,33 @@ class MujocoSimulationNode(Node):
         if time.time() - self.last_render_time > 1.0 / self.RENDER_FREQ:
             # Update the camera position
             self.viewer.cam.lookat[:] = base_pos
+
+            if self.use_vision and self.heightmap.data is not None:
+                mujoco_utils.render_spheres(
+                    viewer=self.viewer,
+                    positions=self.heightmap.data,
+                    geom_ids=self.heightmap.geom_ids,
+                    diameter=0.02,
+                    color=[0, 1, 0, 0.5],
+                )
+
             self.viewer.sync()
             self.last_render_time = time.time()
 
 
+
+
+def create_executor():
+    # EventsExecutor dispatches the callbacks in C++ (rclpy >= Kilted), with much less overhead than the
+    # default SingleThreadedExecutor. It does not exist on Humble, where we fall back to SingleThreadedExecutor
+    try:
+        from rclpy.experimental import EventsExecutor
+        print("Using EventsExecutor")
+        return EventsExecutor()
+    except ImportError:
+        from rclpy.executors import SingleThreadedExecutor
+        print("EventsExecutor not available in this ROS 2 distro, using SingleThreadedExecutor")
+        return SingleThreadedExecutor()
 
 
 #---------------------------
@@ -209,7 +286,7 @@ if __name__ == '__main__':
     
     rclpy.init()
     mujoco_simulation_node = MujocoSimulationNode()
-    rclpy.spin(mujoco_simulation_node)
+    rclpy.spin(mujoco_simulation_node, create_executor())
 
     mujoco_simulation_node.destroy_node()
     rclpy.shutdown()
