@@ -15,7 +15,7 @@ if(robot == "go2"):
     Kp_stand_up_and_down = 50.
     Kd_stand_up_and_down = 5.
 
-    locomotion_policy_folder_path = dir_path + "/../tested_policies/" + robot + "/arm_moving_clock"
+    locomotion_policy_folder_path = dir_path + "/../tested_policies/" + robot + "/blind"
 
 elif(robot == "a2"):
     Kp_walking = 50.
@@ -24,7 +24,7 @@ elif(robot == "a2"):
     Kp_stand_up_and_down = 50.
     Kd_stand_up_and_down = 5.
 
-    locomotion_policy_folder_path = dir_path + "/../tested_policies/" + robot + "/arm_moving_clock"
+    locomotion_policy_folder_path = dir_path + "/../tested_policies/" + robot + "/blind"
 
 # MuJoCo model of the robot with the arm, in the chosen scene
 robot_model_path = dir_path + "/../robot_model/" + robot + "_piper_l_" + scene + ".xml"
