@@ -299,9 +299,6 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         state_space = 0
 
 
-    use_amp = False
-
-
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
