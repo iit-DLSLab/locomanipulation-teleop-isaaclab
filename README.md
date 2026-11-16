@@ -10,7 +10,7 @@
 </div>
 
 ## Overview
-An IsaacLab DirectEnv for performing teleoperation with Unitree Go2 + AgileX Piper, with scripts for sim-to-sim and sim-to-real.
+An IsaacLab DirectEnv for performing teleoperation with Unitree Go2/A2 + AgileX Piper, with scripts for sim-to-sim and sim-to-real.
 
 Features:
 - Locomotion policy able to adjust pose and carry a manipulator
